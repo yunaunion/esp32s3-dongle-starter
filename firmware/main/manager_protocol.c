@@ -19,6 +19,7 @@
 
 static const char *TAG = "manager";
 static SemaphoreHandle_t s_stdout_mutex;
+static manager_protocol_writer_t s_writer;
 
 static void lock_stdout(void)
 {
@@ -39,11 +40,16 @@ static void send_json(cJSON *root)
     lock_stdout();
     char *text = cJSON_PrintUnformatted(root);
     if (text != NULL) {
-        printf("%s\n", text);
+        if (s_writer != NULL) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(s_writer(text, strlen(text)));
+            ESP_ERROR_CHECK_WITHOUT_ABORT(s_writer("\n", 1));
+        } else {
+            printf("%s\n", text);
+            fflush(stdout);
+        }
         cJSON_free(text);
     }
     cJSON_Delete(root);
-    fflush(stdout);
     unlock_stdout();
 }
 
@@ -103,6 +109,11 @@ void manager_protocol_init(void)
     if (s_stdout_mutex == NULL) {
         s_stdout_mutex = xSemaphoreCreateMutex();
     }
+}
+
+void manager_protocol_set_writer(manager_protocol_writer_t writer)
+{
+    s_writer = writer;
 }
 
 void manager_protocol_emit_event(const char *event, cJSON *data)

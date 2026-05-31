@@ -21,10 +21,8 @@ static void manager_task(void *arg)
     size_t line_len = 0;
 
     while (true) {
-        int ch = getchar();
-        if (ch == EOF) {
-            clearerr(stdin);
-            vTaskDelay(pdMS_TO_TICKS(10));
+        int ch = usb_hid_bridge_read_byte(pdMS_TO_TICKS(10));
+        if (ch < 0) {
             continue;
         }
 
@@ -36,7 +34,6 @@ static void manager_task(void *arg)
             line[line_len] = '\0';
             if (line_len > 0) {
                 manager_protocol_handle_line(line);
-                fflush(stdout);
             }
             line_len = 0;
             continue;
@@ -64,6 +61,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(pairing_store_init());
     ESP_ERROR_CHECK(usb_hid_bridge_init());
+    manager_protocol_set_writer(usb_hid_bridge_write);
     ESP_ERROR_CHECK(ble_hid_bridge_init());
     manager_protocol_init();
 

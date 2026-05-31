@@ -25,6 +25,7 @@
 #include "status_led.h"
 
 #include "manager_protocol.h"
+#include "usb_hid_bridge.h"
 
 extern void ble_store_config_init(void);
 
@@ -575,6 +576,10 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
                      (unsigned)param->input.map_index,
                      (unsigned)param->input.report_id,
                      (unsigned)param->input.length);
+            ESP_ERROR_CHECK_WITHOUT_ABORT(usb_hid_bridge_forward_input(param->input.usage,
+                                            param->input.report_id,
+                                            param->input.data,
+                                            param->input.length));
         }
         break;
 

@@ -12,6 +12,7 @@ idf_component_register(
         esp_hid
         nvs_flash
         json
+        esp_tinyusb
         esp_driver_gpio
         esp_driver_rmt
 )
