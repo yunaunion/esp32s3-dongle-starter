@@ -39,6 +39,7 @@
 
 #define ESP_BD_ADDR_STR         "%02x:%02x:%02x:%02x:%02x:%02x"
 #define ESP_BD_ADDR_HEX(addr)   addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]
+#define HIDH_CB_TIMEOUT_MS      10000
 
 static const char *TAG = "NIMBLE_HIDH";
 static SemaphoreHandle_t s_ble_hidh_cb_semaphore = NULL;
@@ -69,7 +70,11 @@ static int status = 0;
 
 static inline void WAIT_CB(void)
 {
-    xSemaphoreTake(s_ble_hidh_cb_semaphore, portMAX_DELAY);
+    if (xSemaphoreTake(s_ble_hidh_cb_semaphore, pdMS_TO_TICKS(HIDH_CB_TIMEOUT_MS)) != pdTRUE) {
+        status = BLE_HS_ETIMEOUT;
+        set_debug_phase("wait.timeout");
+        ESP_LOGE(TAG, "Timed out waiting for HID callback");
+    }
 }
 
 static inline void SEND_CB(void)
@@ -154,6 +159,8 @@ static int read_char(uint16_t conn_handle, uint16_t handle, uint8_t **out, uint1
     set_debug_phase("read_char.start");
     s_read_data_val = NULL;
     s_read_data_len = 0;
+    s_read_status = 0;
+    status = 0;
     int rc;
 
     /* read long because the server may not support the large enough mtu */
@@ -163,6 +170,9 @@ static int read_char(uint16_t conn_handle, uint16_t handle, uint8_t **out, uint1
         return rc;
     }
     WAIT_CB();
+    if (status != 0 && s_read_status == 0) {
+        s_read_status = status;
+    }
     if (s_read_status == 0) {
         *out = s_read_data_val;
         *out_len = s_read_data_len;
@@ -177,6 +187,8 @@ static int read_descr(uint16_t conn_handle, uint16_t handle, uint8_t **out, uint
     set_debug_phase("read_descr.start");
     s_read_data_val = NULL;
     s_read_data_len = 0;
+    s_read_status = 0;
+    status = 0;
 
     rc = ble_gattc_read_long(conn_handle, handle, 0, nimble_on_read, NULL);
     if (rc != 0) {
@@ -184,6 +196,9 @@ static int read_descr(uint16_t conn_handle, uint16_t handle, uint8_t **out, uint
         return rc;
     }
     WAIT_CB();
+    if (status != 0 && s_read_status == 0) {
+        s_read_status = status;
+    }
     if (s_read_status == 0) {
         *out = s_read_data_val;
         *out_len = s_read_data_len;
@@ -345,6 +360,7 @@ static void read_device_services(esp_hidh_dev_t *dev)
     uint8_t hidindex = 0;
     int rc;
 
+    status = 0;
     rc = ble_gattc_disc_all_svcs(dev->ble.conn_id, svc_disced, service_result);
     if (rc != 0) {
         ESP_LOGD(TAG, "Error discovering services : %d", rc);
@@ -391,6 +407,7 @@ static void read_device_services(esp_hidh_dev_t *dev)
             struct ble_gatt_chr char_result[20];
             uint16_t ccount = 20;
             set_debug_phase("chars.start");
+            status = 0;
             rc = ble_gattc_disc_all_chrs(dev->ble.conn_id, service_result[s].start_handle,
                                          service_result[s].end_handle, chr_disced, char_result);
             WAIT_CB();
@@ -508,6 +525,7 @@ static void read_device_services(esp_hidh_dev_t *dev)
                         chr_end_handle = service_result[s].end_handle;
                     }
                     set_debug_phase("descriptors.start");
+                    status = 0;
                     rc = ble_gattc_disc_all_dscs(dev->ble.conn_id, char_result[c].val_handle,
                                                  chr_end_handle, desc_disced, descr_result);
                     WAIT_CB();
@@ -631,6 +649,7 @@ static void register_for_notify(uint16_t conn_handle, uint16_t handle)
                  "rc=%d\n", rc);
         return;
     }
+    status = 0;
     WAIT_CB();
 }
 
@@ -663,6 +682,7 @@ static void write_char_descr(uint16_t conn_id, uint16_t handle, uint16_t value_l
         ESP_LOGE(TAG, "Error: Failed to write descriptor; rc=%d", rc);
         return;
     }
+    status = 0;
     WAIT_CB();
 }
 
@@ -771,6 +791,8 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
         if (!dev->connected) {
             dev->status = event->disconnect.reason;
             dev->ble.conn_id = -1;
+            status = event->disconnect.reason != 0 ? event->disconnect.reason : BLE_HS_ENOTCONN;
+            SEND_CB();
         } else {
             dev->connected = false;
             dev->status = event->disconnect.reason;
