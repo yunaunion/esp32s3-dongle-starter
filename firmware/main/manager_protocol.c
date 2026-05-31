@@ -22,6 +22,8 @@ static const char *TAG = "manager";
 static SemaphoreHandle_t s_stdout_mutex;
 static manager_protocol_writer_t s_writer;
 
+extern const char *esp_ble_hidh_debug_phase(void);
+
 static void lock_stdout(void)
 {
     if (s_stdout_mutex != NULL) {
@@ -160,6 +162,7 @@ cJSON *manager_protocol_status_json(void)
     cJSON_AddStringToObject(status, "ble", ble_hid_bridge_state());
     cJSON_AddStringToObject(status, "usb", "cdc+hid");
     cJSON_AddStringToObject(status, "resetReason", reset_reason_text(esp_reset_reason()));
+    cJSON_AddStringToObject(status, "lastBlePhase", esp_ble_hidh_debug_phase());
     cJSON_AddNumberToObject(status, "pairedCount", pairing_store_count());
     cJSON_AddNumberToObject(status, "connectedCount", connected_device_count());
     return status;

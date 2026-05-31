@@ -20,7 +20,9 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <errno.h>
+#include "esp_attr.h"
 #include "nimble/nimble_opt.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
@@ -40,6 +42,24 @@
 
 static const char *TAG = "NIMBLE_HIDH";
 static SemaphoreHandle_t s_ble_hidh_cb_semaphore = NULL;
+static RTC_NOINIT_ATTR uint32_t s_debug_phase_magic;
+static RTC_NOINIT_ATTR char s_debug_phase[96];
+
+#define DEBUG_PHASE_MAGIC 0x48494448u
+
+static void set_debug_phase(const char *phase)
+{
+    s_debug_phase_magic = DEBUG_PHASE_MAGIC;
+    snprintf(s_debug_phase, sizeof(s_debug_phase), "%s", phase != NULL ? phase : "");
+}
+
+const char *esp_ble_hidh_debug_phase(void)
+{
+    if (s_debug_phase_magic != DEBUG_PHASE_MAGIC || s_debug_phase[0] == '\0') {
+        return "unknown";
+    }
+    return s_debug_phase;
+}
 
 /* variables used for attribute discovery */
 static int services_discovered;
@@ -131,6 +151,7 @@ nimble_on_read(uint16_t conn_handle,
 
 static int read_char(uint16_t conn_handle, uint16_t handle, uint8_t **out, uint16_t *out_len)
 {
+    set_debug_phase("read_char.start");
     s_read_data_val = NULL;
     s_read_data_len = 0;
     int rc;
@@ -153,6 +174,7 @@ static int read_descr(uint16_t conn_handle, uint16_t handle, uint8_t **out, uint
 {
     int rc;
 
+    set_debug_phase("read_descr.start");
     s_read_data_val = NULL;
     s_read_data_len = 0;
 
@@ -183,6 +205,7 @@ svc_disced(uint16_t conn_handle, const struct ble_gatt_error *error,
     status = error->status;
     switch (error->status) {
     case 0:
+        set_debug_phase("svc_disced.item");
         memcpy(service_result + services_discovered, service, sizeof(struct ble_gatt_svc));
         services_discovered++;
         uuid16 = ble_uuid_u16(&service->uuid.u);
@@ -199,6 +222,7 @@ svc_disced(uint16_t conn_handle, const struct ble_gatt_error *error,
         break;
 
     case BLE_HS_EDONE:
+        set_debug_phase("svc_disced.done");
         rc = 0;
         status = 0;
         /* release the sem now */
@@ -231,6 +255,7 @@ chr_disced(uint16_t conn_handle, const struct ble_gatt_error *error,
     status = error->status;
     switch (error->status) {
     case 0:
+        set_debug_phase("chr_disced.item");
         ESP_LOGD(TAG, "Char discovered : def handle : %04x, val_handle : %04x, properties : %02x\n, uuid : %04x",
                  chr->def_handle, chr->val_handle, chr->properties, ble_uuid_u16(&chr->uuid.u));
         memcpy(chrs + chrs_discovered, chr, sizeof(struct ble_gatt_chr));
@@ -238,6 +263,7 @@ chr_disced(uint16_t conn_handle, const struct ble_gatt_error *error,
         break;
 
     case BLE_HS_EDONE:
+        set_debug_phase("chr_disced.done");
         status = 0;
         /* release when discovery is complete */
         SEND_CB();
@@ -270,6 +296,7 @@ desc_disced(uint16_t conn_handle, const struct ble_gatt_error *error,
     status = error->status;
     switch (error->status) {
     case 0:
+        set_debug_phase("desc_disced.item");
         ESP_LOGD(TAG, "DISC discovered : handle : %04x, uuid : %04x",
                  dsc->handle, ble_uuid_u16(&dsc->uuid.u));
         memcpy(dscr + dscs_discovered, dsc, sizeof(struct ble_gatt_dsc));
@@ -277,6 +304,7 @@ desc_disced(uint16_t conn_handle, const struct ble_gatt_error *error,
         break;
 
     case BLE_HS_EDONE:
+        set_debug_phase("desc_disced.done");
         /* All descriptors in this characteristic discovered */
         rc = 0;
         status = 0;
@@ -303,6 +331,7 @@ desc_disced(uint16_t conn_handle, const struct ble_gatt_error *error,
 ** fills the hid device information accordingly in dev */
 static void read_device_services(esp_hidh_dev_t *dev)
 {
+    set_debug_phase("services.start");
     uint16_t suuid, cuuid, duuid;
     uint16_t chandle, dhandle;
     esp_hidh_dev_report_t *report = NULL;
@@ -347,6 +376,7 @@ static void read_device_services(esp_hidh_dev_t *dev)
         memset(dev->config.report_maps, 0, dev->config.report_maps_len * sizeof(esp_hid_raw_report_map_t));
 
         for (uint16_t s = 0; s < dcount; s++) {
+            set_debug_phase("services.loop");
             suuid = ble_uuid_u16(&service_result[s].uuid.u);
             ESP_LOGD(TAG, "Service discovered : start_handle : %d, end handle : %d, uuid: 0x%04x",
                      service_result[s].start_handle, service_result[s].end_handle, suuid);
@@ -360,6 +390,7 @@ static void read_device_services(esp_hidh_dev_t *dev)
 
             struct ble_gatt_chr char_result[20];
             uint16_t ccount = 20;
+            set_debug_phase("chars.start");
             rc = ble_gattc_disc_all_chrs(dev->ble.conn_id, service_result[s].start_handle,
                                          service_result[s].end_handle, chr_disced, char_result);
             WAIT_CB();
@@ -371,6 +402,7 @@ static void read_device_services(esp_hidh_dev_t *dev)
             ccount = chrs_discovered;
             if (rc == ESP_OK) {
                 for (uint16_t c = 0; c < ccount; c++) {
+                    set_debug_phase("chars.loop");
                     cuuid = ble_uuid_u16(&char_result[c].uuid.u);
                     chandle = char_result[c].val_handle;
                     ESP_LOGD(TAG, "  CHAR:(%d), handle: %d, perm: 0x%02x, uuid: 0x%04x",
@@ -475,6 +507,7 @@ static void read_device_services(esp_hidh_dev_t *dev)
                     } else {
                         chr_end_handle = service_result[s].end_handle;
                     }
+                    set_debug_phase("descriptors.start");
                     rc = ble_gattc_disc_all_dscs(dev->ble.conn_id, char_result[c].val_handle,
                                                  chr_end_handle, desc_disced, descr_result);
                     WAIT_CB();
@@ -523,6 +556,7 @@ static void read_device_services(esp_hidh_dev_t *dev)
         }
 
         for (uint8_t d = 0; d < dev->config.report_maps_len; d++) {
+            set_debug_phase("report_map.parse");
             if (dev->reports_len && dev->config.report_maps[d].len) {
                 map = esp_hid_parse_report_map(dev->config.report_maps[d].data, dev->config.report_maps[d].len);
                 if (map) {
@@ -569,6 +603,7 @@ on_subscribe(uint16_t conn_handle,
     uint16_t conn_id;
     conn_id = *((uint16_t*) arg);
 
+    set_debug_phase("subscribe.callback");
     if (conn_id != conn_handle) {
         ESP_LOGE(TAG, "Subscribe callback conn mismatch: expected=%u actual=%u", conn_id, conn_handle);
         SEND_CB();
@@ -585,6 +620,7 @@ on_subscribe(uint16_t conn_handle,
 
 static void register_for_notify(uint16_t conn_handle, uint16_t handle)
 {
+    set_debug_phase("subscribe.start");
     uint8_t value[2];
     int rc;
     value[0] = 1;
@@ -632,6 +668,7 @@ static void write_char_descr(uint16_t conn_id, uint16_t handle, uint16_t value_l
 
 static void attach_report_listeners(esp_hidh_dev_t *dev)
 {
+    set_debug_phase("attach.start");
     if (dev == NULL) {
         return;
     }
@@ -648,6 +685,7 @@ static void attach_report_listeners(esp_hidh_dev_t *dev)
     }
 
     while (report) {
+        set_debug_phase("attach.report");
         /* subscribe to notifications */
         if ((report->permissions & BLE_GATT_CHR_PROP_NOTIFY) != 0 && report->protocol_mode == ESP_HID_PROTOCOL_MODE_REPORT) {
             register_for_notify(dev->ble.conn_id, report->handle);
@@ -658,6 +696,7 @@ static void attach_report_listeners(esp_hidh_dev_t *dev)
         }
         report = report->next;
     }
+    set_debug_phase("attach.done");
 }
 
 static int
@@ -673,6 +712,7 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         /* A new connection was established or a connection attempt failed. */
         if (event->connect.status == 0) {
+            set_debug_phase("gap.connect.ok");
             /* Connection successfully established. */
             MODLOG_DFLT(INFO, "Connection established ");
 
@@ -710,6 +750,7 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
             }
             SEND_CB();
         } else {
+            set_debug_phase("gap.connect.failed");
             MODLOG_DFLT(ERROR, "Error: Connection failed; status=%d\n",
                         event->connect.status);
             dev = opening_dev;
@@ -725,6 +766,7 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
+        set_debug_phase("gap.disconnect");
         /* Connection terminated. */
         MODLOG_DFLT(INFO, "disconnect; reason=%d ", event->disconnect.reason);
         dev = esp_hidh_dev_get_by_conn_id(event->disconnect.conn.conn_handle);
@@ -754,6 +796,7 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX:
+        set_debug_phase("gap.notify");
         /* Peer sent us a notification or indication. */
         MODLOG_DFLT(DEBUG, "received %s; conn_handle=%d attr_handle=%d "
                     "attr_len=%d\n",
@@ -963,7 +1006,7 @@ esp_hidh_dev_t *esp_ble_hidh_dev_open(uint8_t *bda, uint8_t address_type)
     ble_addr_t addr;
     uint8_t own_addr_type;
 
-    own_addr_type = 0; // set to public for now
+    set_debug_phase("open.start");
     esp_hidh_dev_t *dev = esp_hidh_dev_malloc();
     if (dev == NULL) {
         ESP_LOGE(TAG, "malloc esp_hidh_dev_t failed");
@@ -979,12 +1022,21 @@ esp_hidh_dev_t *esp_ble_hidh_dev_open(uint8_t *bda, uint8_t address_type)
     memcpy(addr.val, bda, sizeof(addr.val));
     addr.type = address_type;
 
+    int rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (rc != 0) {
+        esp_hidh_dev_free_inner(dev);
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed: %d", rc);
+        return NULL;
+    }
+
+    set_debug_phase("open.gap_connect");
     ret = ble_gap_connect(own_addr_type, &addr, 30000, NULL, esp_hidh_gattc_event_handler, dev);
     if (ret) {
         esp_hidh_dev_free_inner(dev);
         ESP_LOGE(TAG, "esp_ble_gattc_open failed: %d", ret);
         return NULL;
     }
+    set_debug_phase("open.wait_connect");
     WAIT_CB();
     if (dev->ble.conn_id < 0) {
         ret = dev->status;
@@ -1000,8 +1052,10 @@ esp_hidh_dev_t *esp_ble_hidh_dev_open(uint8_t *bda, uint8_t address_type)
     dev->connected = true;
 
     /* perform service discovery and fill the report maps */
+    set_debug_phase("open.services");
     read_device_services(dev);
     if (dev->status != ESP_OK || dev->reports_len == 0) {
+        set_debug_phase("open.discovery_failed");
         ret = dev->status != ESP_OK ? dev->status : ESP_FAIL;
         ESP_LOGE(TAG, "HID service discovery failed: status=0x%x reports=%u",
                  dev->status, (unsigned)dev->reports_len);
@@ -1011,6 +1065,7 @@ esp_hidh_dev_t *esp_ble_hidh_dev_open(uint8_t *bda, uint8_t address_type)
     }
 
     if (event_loop_handle) {
+        set_debug_phase("open.post_event");
         esp_hidh_event_data_t p = {0};
         p.open.status = ESP_OK;
         p.open.dev = dev;
@@ -1018,6 +1073,7 @@ esp_hidh_dev_t *esp_ble_hidh_dev_open(uint8_t *bda, uint8_t address_type)
     }
 
     attach_report_listeners(dev);
+    set_debug_phase("open.success");
     return dev;
 }
 #endif // CONFIG_BT_NIMBLE_HID_SERVICE
