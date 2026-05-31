@@ -271,7 +271,7 @@ async function pairDevice(device) {
       addressType: device.addressType,
       name: device.name,
       kind: device.kind,
-    }, { timeoutMs: 20000 });
+    }, { timeoutMs: 45000 });
     await refreshAll();
   } catch (error) {
     showError(error);
@@ -410,7 +410,7 @@ function renderPairedList() {
     autoConnect.checked = Boolean(device.autoConnect);
     autoConnect.addEventListener("change", () => setPolicy(device, { autoConnect: autoConnect.checked }));
 
-    row.querySelector(".connect-device").addEventListener("click", () => request("connect", { id: device.id }, { timeoutMs: 20000 }).then(refreshAll).catch(showError));
+    row.querySelector(".connect-device").addEventListener("click", () => request("connect", { id: device.id }, { timeoutMs: 45000 }).then(refreshAll).catch(showError));
     row.querySelector(".disconnect-device").addEventListener("click", () => request("disconnect", { id: device.id }, { timeoutMs: 10000 }).then(refreshAll).catch(showError));
     row.querySelector(".delete-device").addEventListener("click", () => deleteDevice(device));
     els.pairedList.append(row);

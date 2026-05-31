@@ -47,11 +47,15 @@ static const size_t MAX_DISCOVERY_NAME = 48;
 static const size_t MAX_DISCOVERY_KIND = 16;
 static const size_t MAX_DISCOVERY_ADDRESS = 24;
 static const size_t MAX_DISCOVERY_ADDRESS_TYPE = 12;
+static const uint32_t OPEN_MUTEX_TIMEOUT_MS = 1000;
+static const uint32_t SCAN_CANCEL_WAIT_MS = 500;
 
 static SemaphoreHandle_t s_state_mutex;
+static SemaphoreHandle_t s_open_mutex;
 static SemaphoreHandle_t s_sync_sem;
 static bool s_scan_active;
 static bool s_scan_hid_only = true;
+static bool s_open_in_progress;
 static char s_state[16] = "init";
 static active_connection_t s_active_connections[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
 
@@ -196,8 +200,13 @@ static void update_state_after_transition(void)
     if (s_state_mutex != NULL) {
         xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     }
-    set_state_locked(any_device_connected_locked() ? "connected" : "ready",
-                     any_device_connected_locked() ? STATUS_LED_CONNECTED : STATUS_LED_READY);
+    if (s_open_in_progress) {
+        set_state_locked("pairing", STATUS_LED_PAIRING);
+    } else {
+        bool connected = any_device_connected_locked();
+        set_state_locked(connected ? "connected" : "ready",
+                         connected ? STATUS_LED_CONNECTED : STATUS_LED_READY);
+    }
     if (s_state_mutex != NULL) {
         xSemaphoreGive(s_state_mutex);
     }
@@ -309,14 +318,63 @@ static void emit_device_discovered(const char *name, const char *address, const 
     manager_protocol_emit_event("device.discovered", data);
 }
 
-static esp_err_t open_device_blocking(const paired_device_t *device)
+static bool open_in_progress(void)
+{
+    bool in_progress = false;
+    if (s_state_mutex != NULL) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        in_progress = s_open_in_progress;
+        xSemaphoreGive(s_state_mutex);
+    }
+    return in_progress;
+}
+
+static void cancel_scan_for_connection(void)
+{
+    if (ble_gap_disc_active()) {
+        int rc = ble_gap_disc_cancel();
+        if (rc != 0 && rc != BLE_HS_EALREADY) {
+            ESP_LOGW(TAG, "ble_gap_disc_cancel before open failed: %d", rc);
+        }
+
+        for (uint32_t elapsed = 0; elapsed < SCAN_CANCEL_WAIT_MS && ble_gap_disc_active(); elapsed += 10) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (s_state_mutex != NULL) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        s_scan_active = false;
+        xSemaphoreGive(s_state_mutex);
+    } else {
+        s_scan_active = false;
+    }
+}
+
+static void disable_auto_connect_after_failure(const paired_device_t *device)
+{
+    if (device == NULL || device->id[0] == '\0' || pairing_store_find(device->id) == NULL) {
+        return;
+    }
+
+    bool auto_connect = false;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(pairing_store_update_policy(device->id, NULL, &auto_connect));
+    manager_protocol_emit_event("bond.changed", NULL);
+}
+
+static esp_err_t open_device_blocking(const paired_device_t *device, bool store_on_success)
 {
     uint8_t bda[6];
     uint8_t addr_type;
     esp_hidh_dev_t *dev = NULL;
+    esp_err_t err = ESP_OK;
 
     if (device == NULL || device->address[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_open_mutex == NULL || xSemaphoreTake(s_open_mutex, pdMS_TO_TICKS(OPEN_MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (find_active_connection(device->address) != NULL) {
@@ -324,20 +382,26 @@ static esp_err_t open_device_blocking(const paired_device_t *device)
             ESP_ERROR_CHECK_WITHOUT_ABORT(pairing_store_set_connected(device->id, true));
         }
         manager_protocol_emit_event("bond.changed", NULL);
+        xSemaphoreGive(s_open_mutex);
         return ESP_OK;
     }
 
     if (!parse_bda(device->address, bda)) {
+        xSemaphoreGive(s_open_mutex);
         return ESP_ERR_INVALID_ARG;
     }
 
     addr_type = address_type_from_text(device->address_type);
 
+    cancel_scan_for_connection();
+
     if (s_state_mutex != NULL) {
         xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        s_open_in_progress = true;
         set_state_locked("pairing", STATUS_LED_PAIRING);
         xSemaphoreGive(s_state_mutex);
     } else {
+        s_open_in_progress = true;
         copy_text(s_state, sizeof(s_state), "pairing");
         status_led_set(STATUS_LED_PAIRING);
     }
@@ -345,9 +409,36 @@ static esp_err_t open_device_blocking(const paired_device_t *device)
 
     dev = esp_hidh_dev_open(bda, ESP_HID_TRANSPORT_BLE, addr_type);
     if (dev == NULL) {
+        disable_auto_connect_after_failure(device);
+        if (s_state_mutex != NULL) {
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            s_open_in_progress = false;
+            xSemaphoreGive(s_state_mutex);
+        } else {
+            s_open_in_progress = false;
+        }
         update_state_after_transition();
         emit_status_changed();
+        xSemaphoreGive(s_open_mutex);
         return ESP_FAIL;
+    }
+
+    if (store_on_success) {
+        err = pairing_store_upsert(device);
+        if (err != ESP_OK) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_hidh_dev_close(dev));
+            if (s_state_mutex != NULL) {
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                s_open_in_progress = false;
+                xSemaphoreGive(s_state_mutex);
+            } else {
+                s_open_in_progress = false;
+            }
+            update_state_after_transition();
+            emit_status_changed();
+            xSemaphoreGive(s_open_mutex);
+            return err;
+        }
     }
 
     mark_connection_active(device->address, dev);
@@ -355,8 +446,16 @@ static esp_err_t open_device_blocking(const paired_device_t *device)
         ESP_ERROR_CHECK_WITHOUT_ABORT(pairing_store_set_connected(device->id, true));
     }
     manager_protocol_emit_event("bond.changed", NULL);
+    if (s_state_mutex != NULL) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        s_open_in_progress = false;
+        xSemaphoreGive(s_state_mutex);
+    } else {
+        s_open_in_progress = false;
+    }
     update_state_after_transition();
     emit_status_changed();
+    xSemaphoreGive(s_open_mutex);
     return ESP_OK;
 }
 
@@ -373,7 +472,7 @@ static void auto_connect_task(void *arg)
     device.auto_connect = true;
     device.connected = false;
 
-    (void)open_device_blocking(&device);
+    (void)open_device_blocking(&device, false);
 
     free(ctx);
     vTaskDelete(NULL);
@@ -405,7 +504,7 @@ static void maybe_auto_connect(const char *name, const char *address, const char
     (void)kind;
 
     const paired_device_t *record = pairing_store_find_by_address(address);
-    if (record == NULL || !record->auto_connect || record->connected) {
+    if (record == NULL || !record->auto_connect || record->connected || open_in_progress()) {
         return;
     }
 
@@ -437,6 +536,10 @@ static int scan_gap_event(struct ble_gap_event *event, void *arg)
         char address_type[MAX_DISCOVERY_ADDRESS_TYPE];
         esp_hid_usage_t usage = ESP_HID_USAGE_GENERIC;
         bool hid_candidate = false;
+
+        if (open_in_progress()) {
+            return 0;
+        }
 
         memset(&fields, 0, sizeof(fields));
         if (ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data) != 0) {
@@ -474,8 +577,13 @@ static int scan_gap_event(struct ble_gap_event *event, void *arg)
         if (s_state_mutex != NULL) {
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             s_scan_active = false;
-            set_state_locked(any_device_connected_locked() ? "connected" : "ready",
-                             any_device_connected_locked() ? STATUS_LED_CONNECTED : STATUS_LED_READY);
+            if (s_open_in_progress) {
+                set_state_locked("pairing", STATUS_LED_PAIRING);
+            } else {
+                bool connected = any_device_connected_locked();
+                set_state_locked(connected ? "connected" : "ready",
+                                 connected ? STATUS_LED_CONNECTED : STATUS_LED_READY);
+            }
             xSemaphoreGive(s_state_mutex);
         } else {
             s_scan_active = false;
@@ -651,10 +759,13 @@ esp_err_t ble_hid_bridge_init(void)
     if (s_state_mutex == NULL) {
         s_state_mutex = xSemaphoreCreateMutex();
     }
+    if (s_open_mutex == NULL) {
+        s_open_mutex = xSemaphoreCreateMutex();
+    }
     if (s_sync_sem == NULL) {
         s_sync_sem = xSemaphoreCreateBinary();
     }
-    if (s_state_mutex == NULL || s_sync_sem == NULL) {
+    if (s_state_mutex == NULL || s_open_mutex == NULL || s_sync_sem == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -698,6 +809,7 @@ esp_err_t ble_hid_bridge_init(void)
     if (s_state_mutex != NULL) {
         xSemaphoreTake(s_state_mutex, portMAX_DELAY);
         s_scan_active = false;
+        s_open_in_progress = false;
         set_state_locked("ready", STATUS_LED_READY);
         xSemaphoreGive(s_state_mutex);
     } else {
@@ -799,12 +911,7 @@ esp_err_t ble_hid_bridge_pair_start(cJSON *params)
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = pairing_store_upsert(&device);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = open_device_blocking(&device);
+    err = open_device_blocking(&device, true);
     if (err != ESP_OK) {
         update_state_after_transition();
         emit_status_changed();
@@ -822,7 +929,7 @@ esp_err_t ble_hid_bridge_connect_device(const paired_device_t *device)
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = open_device_blocking(device);
+    err = open_device_blocking(device, false);
     if (err != ESP_OK) {
         update_state_after_transition();
         emit_status_changed();
