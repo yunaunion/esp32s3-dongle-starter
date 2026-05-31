@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32-S3 BLE HID Dongle Manager</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ESP32-S3</p>
+        <h1>BLE HID Dongle Manager</h1>
+      </div>
+      <div class="topbar-actions">
+        <span id="connectionBadge" class="badge badge-idle">未接続</span>
+        <button id="demoButton" class="button button-secondary" type="button">デモ</button>
+        <button id="connectButton" class="button button-primary" type="button">接続</button>
+      </div>
+    </header>
+
+    <section class="status-grid" aria-label="dongle status">
+      <div class="metric">
+        <span class="metric-label">Firmware</span>
+        <strong id="firmwareValue">-</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">BLE</span>
+        <strong id="bleValue">-</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">USB</span>
+        <strong id="usbValue">-</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Paired</span>
+        <strong id="pairedCountValue">0</strong>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <section class="panel paired-panel">
+        <div class="panel-heading">
+          <h2>ペアリング済み</h2>
+          <button id="refreshButton" class="button button-secondary" type="button">更新</button>
+        </div>
+        <div id="pairedList" class="device-list" aria-live="polite"></div>
+      </section>
+
+      <section class="panel scan-panel">
+        <div class="panel-heading">
+          <h2>スキャン</h2>
+          <div class="button-row">
+            <button id="scanButton" class="button button-secondary" type="button">開始</button>
+            <button id="stopScanButton" class="button button-quiet" type="button">停止</button>
+          </div>
+        </div>
+        <div id="scanList" class="device-list" aria-live="polite"></div>
+      </section>
+    </section>
+
+    <section class="panel log-panel">
+      <div class="panel-heading">
+        <h2>ログ</h2>
+        <button id="clearLogButton" class="button button-quiet" type="button">消去</button>
+      </div>
+      <pre id="logOutput" class="log-output" aria-live="polite"></pre>
+    </section>
+  </main>
+
+  <template id="pairedDeviceTemplate">
+    <article class="device-row">
+      <div class="device-main">
+        <strong class="device-name"></strong>
+        <span class="device-meta"></span>
+      </div>
+      <label class="switch">
+        <input class="auto-connect" type="checkbox">
+        <span>Auto</span>
+      </label>
+      <button class="button button-secondary connect-device" type="button">接続</button>
+      <button class="button button-quiet disconnect-device" type="button">切断</button>
+      <button class="button button-danger delete-device" type="button">削除</button>
+    </article>
+  </template>
+
+  <template id="scanDeviceTemplate">
+    <article class="device-row">
+      <div class="device-main">
+        <strong class="device-name"></strong>
+        <span class="device-meta"></span>
+      </div>
+      <button class="button button-primary pair-device" type="button">ペアリング</button>
+    </article>
+  </template>
+
+  <script src="./app.js" type="module"></script>
+</body>
+</html>
+

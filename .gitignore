@@ -1,0 +1,9 @@
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+managed_components/
+dependencies.lock
+*.pyc
+__pycache__/
+.DS_Store
+
