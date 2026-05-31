@@ -9,6 +9,7 @@
 #include "esp_err.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "pairing_store.h"
@@ -104,6 +105,34 @@ static void show_store_led_state(void)
     status_led_set(any_device_connected() ? STATUS_LED_CONNECTED : STATUS_LED_READY);
 }
 
+static const char *reset_reason_text(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON:
+        return "poweron";
+    case ESP_RST_EXT:
+        return "external";
+    case ESP_RST_SW:
+        return "software";
+    case ESP_RST_PANIC:
+        return "panic";
+    case ESP_RST_INT_WDT:
+        return "interrupt_wdt";
+    case ESP_RST_TASK_WDT:
+        return "task_wdt";
+    case ESP_RST_WDT:
+        return "wdt";
+    case ESP_RST_DEEPSLEEP:
+        return "deepsleep";
+    case ESP_RST_BROWNOUT:
+        return "brownout";
+    case ESP_RST_SDIO:
+        return "sdio";
+    default:
+        return "unknown";
+    }
+}
+
 void manager_protocol_init(void)
 {
     if (s_stdout_mutex == NULL) {
@@ -130,6 +159,7 @@ cJSON *manager_protocol_status_json(void)
     cJSON_AddStringToObject(status, "firmware", FIRMWARE_VERSION);
     cJSON_AddStringToObject(status, "ble", ble_hid_bridge_state());
     cJSON_AddStringToObject(status, "usb", "cdc+hid");
+    cJSON_AddStringToObject(status, "resetReason", reset_reason_text(esp_reset_reason()));
     cJSON_AddNumberToObject(status, "pairedCount", pairing_store_count());
     cJSON_AddNumberToObject(status, "connectedCount", connected_device_count());
     return status;
