@@ -1,5 +1,44 @@
 const PROTOCOL_VERSION = 1;
 
+const COMMAND_LABELS = {
+  hello: "接続確認",
+  "dongle.status": "状態取得",
+  "bond.list": "保存済み一覧取得",
+  "scan.start": "スキャン開始",
+  "scan.stop": "スキャン停止",
+  "pair.start": "ペアリング",
+  "bond.delete": "削除",
+  connect: "接続",
+  disconnect: "切断",
+  "policy.set": "設定変更",
+};
+
+const KIND_LABELS = {
+  hid: "HID機器",
+  keyboard: "キーボード",
+  mouse: "マウス",
+  gamepad: "ゲームパッド",
+};
+
+const ADDRESS_TYPE_LABELS = {
+  random: "ランダム",
+  public: "公開",
+};
+
+const BLE_STATE_LABELS = {
+  stub: "初期化中（開発版）",
+  "ready-stub": "待機中（開発版）",
+  "scanning-stub": "スキャン中（開発版）",
+  "pairing-stub": "ペアリング中（開発版）",
+  ready: "待機中",
+  scanning: "スキャン中",
+  pairing: "ペアリング中",
+};
+
+const USB_STATE_LABELS = {
+  "cdc+hid": "管理通信 + HID",
+};
+
 const state = {
   connected: false,
   demo: false,
@@ -58,7 +97,7 @@ class SerialTransport {
 
   async disconnect() {
     for (const [, pending] of this.pending) {
-      pending.reject(new Error("Disconnected"));
+      pending.reject(new Error("切断されました"));
     }
     this.pending.clear();
 
@@ -88,7 +127,7 @@ class SerialTransport {
         this.consume(this.decoder.decode(value, { stream: true }));
       }
     } catch (error) {
-      logLine(`RX error: ${error.message}`);
+      logLine(`受信エラー: ${error.message}`);
     } finally {
       if (state.connected) {
         setConnected(false);
@@ -113,13 +152,13 @@ class SerialTransport {
     const id = String(this.nextId++);
     const payload = { id, command, params };
     const line = `${JSON.stringify(payload)}\n`;
-    logLine(`TX ${line.trim()}`);
+    logLine(`送信 ${line.trim()}`);
     await this.writer.write(this.encoder.encode(line));
 
     return new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`${command} timed out`));
+        reject(new Error(`${commandLabel(command)}がタイムアウトしました`));
       }, 8000);
       this.pending.set(id, { resolve, reject, timer });
     });
@@ -136,7 +175,7 @@ class SerialTransport {
       pending.resolve(message.data ?? {});
       return;
     }
-    pending.reject(new Error(message.error?.message || "Command failed"));
+    pending.reject(new Error(message.error?.message || "コマンドが失敗しました"));
   }
 }
 
@@ -153,8 +192,9 @@ els.connectButton.addEventListener("click", async () => {
     await transport.connect();
     setConnected(true);
     const hello = await request("hello", { protocol: PROTOCOL_VERSION, client: "github-pages" });
-    logLine(`HELLO ${JSON.stringify(hello)}`);
+    logLine(`接続確認 ${JSON.stringify(hello)}`);
     await refreshAll();
+    await startScan({ automatic: true });
   } catch (error) {
     setConnected(false, true);
     logLine(`接続失敗: ${error.message}`);
@@ -175,7 +215,7 @@ els.demoButton.addEventListener("click", () => {
 
 els.refreshButton.addEventListener("click", refreshAll);
 els.scanButton.addEventListener("click", () => startScan());
-els.stopScanButton.addEventListener("click", () => request("scan.stop").catch(showError));
+els.stopScanButton.addEventListener("click", () => stopScan());
 els.clearLogButton.addEventListener("click", () => {
   state.logs = [];
   renderLog();
@@ -204,11 +244,21 @@ async function refreshAll() {
   }
 }
 
-async function startScan() {
+async function startScan(options = {}) {
   try {
     state.discovered = [];
     renderScanList();
     await request("scan.start", { durationMs: 10000, hidOnly: true });
+    logLine(options.automatic ? "接続後の自動スキャンを開始しました" : "スキャンを開始しました");
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function stopScan() {
+  try {
+    await request("scan.stop");
+    logLine("スキャンを停止しました");
   } catch (error) {
     showError(error);
   }
@@ -245,12 +295,12 @@ async function setPolicy(device, patch) {
 }
 
 function handleMessage(line) {
-  logLine(`RX ${line}`);
+  logLine(`受信 ${line}`);
   let message;
   try {
     message = JSON.parse(line);
   } catch (error) {
-    logLine(`JSON parse error: ${error.message}`);
+    logLine(`JSON解析エラー: ${error.message}`);
     return;
   }
 
@@ -280,6 +330,26 @@ function applyStatus(status) {
   };
 }
 
+function commandLabel(command) {
+  return COMMAND_LABELS[command] ?? command;
+}
+
+function kindLabel(kind) {
+  return KIND_LABELS[kind] ?? (kind || "HID機器");
+}
+
+function addressTypeLabel(addressType) {
+  return ADDRESS_TYPE_LABELS[addressType] ?? (addressType || "-");
+}
+
+function bleStateLabel(value) {
+  return BLE_STATE_LABELS[value] ?? (value || "-");
+}
+
+function usbStateLabel(value) {
+  return USB_STATE_LABELS[value] ?? (value || "-");
+}
+
 function upsertDiscovered(device) {
   const key = `${device.addressType}:${device.address}`;
   const next = state.discovered.filter((item) => `${item.addressType}:${item.address}` !== key);
@@ -298,8 +368,8 @@ function setConnected(connected, error = false) {
 
 function render() {
   els.firmwareValue.textContent = state.status.firmware;
-  els.bleValue.textContent = state.status.ble;
-  els.usbValue.textContent = state.status.usb;
+  els.bleValue.textContent = bleStateLabel(state.status.ble);
+  els.usbValue.textContent = usbStateLabel(state.status.usb);
   els.pairedCountValue.textContent = String(state.status.pairedCount);
   renderControls();
   renderPairedList();
@@ -326,8 +396,8 @@ function renderPairedList() {
     const row = els.pairedTemplate.content.firstElementChild.cloneNode(true);
     row.querySelector(".device-name").textContent = device.label || device.name || device.address;
     row.querySelector(".device-meta").textContent = [
-      device.kind || "hid",
-      device.connected ? "connected" : "idle",
+      kindLabel(device.kind),
+      device.connected ? "接続中" : "待機中",
       device.address,
     ].filter(Boolean).join(" / ");
 
@@ -353,8 +423,8 @@ function renderScanList() {
     const row = els.scanTemplate.content.firstElementChild.cloneNode(true);
     row.querySelector(".device-name").textContent = device.name || device.address;
     row.querySelector(".device-meta").textContent = [
-      device.kind || "hid",
-      device.addressType,
+      kindLabel(device.kind),
+      addressTypeLabel(device.addressType),
       device.address,
       Number.isFinite(device.rssi) ? `${device.rssi} dBm` : "",
     ].filter(Boolean).join(" / ");
@@ -383,7 +453,7 @@ function logLine(text) {
 }
 
 function showError(error) {
-  logLine(`ERROR ${error.message}`);
+  logLine(`エラー: ${error.message}`);
 }
 
 function loadDemoState() {
@@ -397,7 +467,7 @@ function loadDemoState() {
     {
       id: "dev-kbd-001",
       name: "MX Keys Mini",
-      label: "Desk Keyboard",
+      label: "デスク用キーボード",
       address: "F1:4A:82:10:2D:91",
       addressType: "random",
       kind: "keyboard",
@@ -430,12 +500,12 @@ function loadDemoState() {
       rssi: -49,
     },
   ];
-  logLine("Demo data loaded");
+  logLine("デモデータを読み込みました");
 }
 
 async function demoRequest(command, params) {
   await new Promise((resolve) => window.setTimeout(resolve, 180));
-  logLine(`DEMO ${command} ${JSON.stringify(params)}`);
+  logLine(`デモ処理: ${commandLabel(command)} ${JSON.stringify(params)}`);
 
   if (command === "dongle.status") {
     return state.status;

@@ -5,10 +5,12 @@ idf_component_register(
         "pairing_store.c"
         "ble_hid_bridge.c"
         "usb_hid_bridge.c"
+        "status_led.c"
     INCLUDE_DIRS "."
     REQUIRES
         bt
         nvs_flash
         json
+        esp_driver_gpio
+        esp_driver_rmt
 )
-

@@ -10,6 +10,7 @@
 #include "ble_hid_bridge.h"
 #include "manager_protocol.h"
 #include "pairing_store.h"
+#include "status_led.h"
 #include "usb_hid_bridge.h"
 
 static const char *TAG = "dongle";
@@ -51,6 +52,9 @@ static void manager_task(void *arg)
 
 void app_main(void)
 {
+    ESP_ERROR_CHECK_WITHOUT_ABORT(status_led_init());
+    status_led_set(STATUS_LED_BOOT);
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -62,6 +66,7 @@ void app_main(void)
     ESP_ERROR_CHECK(usb_hid_bridge_init());
     ESP_ERROR_CHECK(ble_hid_bridge_init());
 
+    status_led_set(STATUS_LED_READY);
     manager_protocol_emit_event("status.changed", manager_protocol_status_json());
 
     xTaskCreate(manager_task, "manager_task", 4096, NULL, 5, NULL);

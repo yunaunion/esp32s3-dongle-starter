@@ -1,34 +1,35 @@
-# Web Manager
+# Web管理画面
 
-This is a static GitHub Pages-compatible Web Serial UI.
+GitHub Pagesでそのまま公開できる、Web Serial対応の静的管理画面です。
 
-## Local Preview
+## ローカル確認
 
-From the project root:
+プロジェクト直下から次を実行します。
 
 ```bash
 python -m http.server 8765 --directory web
 ```
 
-Then open:
+その後、ブラウザで開きます。
 
 ```text
 http://127.0.0.1:8765/
 ```
 
-`localhost`/`127.0.0.1` and GitHub Pages HTTPS both satisfy the secure-context requirement for Web Serial in supported Chromium browsers.
+Web Serialは対応Chromiumブラウザのセキュアコンテキストで動きます。`localhost`/`127.0.0.1`とGitHub PagesのHTTPSはどちらも条件を満たします。
 
 ## GitHub Pages
 
-Publish the `web/` directory as the Pages root. No build step is required.
+`.github/workflows/pages.yml`で`web/`をPagesへ公開します。ビルド手順は不要です。
 
-## Development Mode
+## 使い方
 
-Press the `デモ` button to populate mock paired devices and scan results without hardware.
+`デモ`を押すと、実機なしで保存済みデバイスとスキャン結果を表示できます。
 
-When firmware is flashed, press `接続`, choose the ESP32-S3 serial port, then use:
+ファームを書き込んだESP32-S3を接続したら、`接続`を押してESP32-S3のシリアルポートを選びます。接続に成功すると自動でスキャンを開始します。
 
-- `更新` for `dongle.status` + `bond.list`
-- `開始` for `scan.start`
-- `ペアリング` for `pair.start`
-- `削除` for `bond.delete`
+- `更新`: ドングル状態と保存済み一覧を再取得
+- `開始`: BLE HIDスキャンを開始
+- `停止`: BLE HIDスキャンを停止
+- `ペアリング`: 検出した機器を保存
+- `削除`: 保存済み機器を削除

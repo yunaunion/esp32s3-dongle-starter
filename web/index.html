@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ESP32-S3 BLE HID Dongle Manager</title>
+  <title>ESP32-S3 BLE HIDドングル管理</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">ESP32-S3</p>
-        <h1>BLE HID Dongle Manager</h1>
+        <h1>BLE HIDドングル管理</h1>
       </div>
       <div class="topbar-actions">
         <span id="connectionBadge" class="badge badge-idle">未接続</span>
@@ -20,9 +20,9 @@
       </div>
     </header>
 
-    <section class="status-grid" aria-label="dongle status">
+    <section class="status-grid" aria-label="ドングル状態">
       <div class="metric">
-        <span class="metric-label">Firmware</span>
+        <span class="metric-label">ファームウェア</span>
         <strong id="firmwareValue">-</strong>
       </div>
       <div class="metric">
@@ -34,7 +34,7 @@
         <strong id="usbValue">-</strong>
       </div>
       <div class="metric">
-        <span class="metric-label">Paired</span>
+        <span class="metric-label">保存数</span>
         <strong id="pairedCountValue">0</strong>
       </div>
     </section>
@@ -77,7 +77,7 @@
       </div>
       <label class="switch">
         <input class="auto-connect" type="checkbox">
-        <span>Auto</span>
+        <span>自動接続</span>
       </label>
       <button class="button button-secondary connect-device" type="button">接続</button>
       <button class="button button-quiet disconnect-device" type="button">切断</button>
@@ -98,4 +98,3 @@
   <script src="./app.js" type="module"></script>
 </body>
 </html>
-

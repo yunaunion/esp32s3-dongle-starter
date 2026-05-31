@@ -8,6 +8,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "pairing_store.h"
+#include "status_led.h"
 
 #define FIRMWARE_VERSION "0.1.0"
 #define PROTOCOL_VERSION 1
@@ -35,6 +36,8 @@ static void send_ok(const char *id, cJSON *data)
 
 static void send_error(const char *id, const char *code, const char *message)
 {
+    status_led_set(STATUS_LED_ERROR);
+
     cJSON *root = cJSON_CreateObject();
     cJSON *error = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "id", id);
@@ -43,6 +46,22 @@ static void send_error(const char *id, const char *code, const char *message)
     cJSON_AddStringToObject(error, "message", message);
     cJSON_AddItemToObject(root, "error", error);
     send_json(root);
+}
+
+static bool any_device_connected(void)
+{
+    for (size_t index = 0; index < pairing_store_count(); ++index) {
+        const paired_device_t *device = pairing_store_get(index);
+        if (device != NULL && device->connected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void show_store_led_state(void)
+{
+    status_led_set(any_device_connected() ? STATUS_LED_CONNECTED : STATUS_LED_READY);
 }
 
 void manager_protocol_emit_event(const char *event, cJSON *data)
@@ -121,6 +140,7 @@ void manager_protocol_handle_line(const char *line)
     }
 
     if (strcmp(command, "hello") == 0) {
+        show_store_led_state();
         cJSON *data = cJSON_CreateObject();
         cJSON_AddNumberToObject(data, "protocol", PROTOCOL_VERSION);
         cJSON_AddStringToObject(data, "firmware", FIRMWARE_VERSION);
@@ -132,19 +152,26 @@ void manager_protocol_handle_line(const char *line)
     } else if (strcmp(command, "scan.start") == 0) {
         esp_err_t err = ble_hid_bridge_scan_start(params);
         if (err == ESP_OK) {
+            status_led_set(STATUS_LED_SCANNING);
             cJSON *data = cJSON_CreateObject();
             cJSON_AddBoolToObject(data, "scanning", true);
             send_ok(id, data);
+            manager_protocol_emit_event("status.changed", manager_protocol_status_json());
         } else {
             send_error(id, "scan_failed", "BLE HID scan could not be started");
         }
     } else if (strcmp(command, "scan.stop") == 0) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(ble_hid_bridge_scan_stop());
+        show_store_led_state();
         send_ok(id, NULL);
+        manager_protocol_emit_event("status.changed", manager_protocol_status_json());
     } else if (strcmp(command, "pair.start") == 0) {
+        status_led_set(STATUS_LED_PAIRING);
         esp_err_t err = ble_hid_bridge_pair_start(params);
         if (err == ESP_OK) {
+            show_store_led_state();
             send_ok(id, NULL);
+            manager_protocol_emit_event("status.changed", manager_protocol_status_json());
         } else {
             send_error(id, "pair_failed", "BLE HID pairing could not be completed");
         }
@@ -152,8 +179,10 @@ void manager_protocol_handle_line(const char *line)
         const char *device_id = json_string(params, "id");
         esp_err_t err = pairing_store_delete(device_id);
         if (err == ESP_OK) {
+            show_store_led_state();
             send_ok(id, NULL);
             manager_protocol_emit_event("bond.changed", paired_devices_json());
+            manager_protocol_emit_event("status.changed", manager_protocol_status_json());
         } else {
             send_error(id, "not_found", "Device is not in the pairing store");
         }
@@ -161,8 +190,10 @@ void manager_protocol_handle_line(const char *line)
         const char *device_id = json_string(params, "id");
         esp_err_t err = pairing_store_set_connected(device_id, true);
         if (err == ESP_OK) {
+            show_store_led_state();
             send_ok(id, NULL);
             manager_protocol_emit_event("bond.changed", paired_devices_json());
+            manager_protocol_emit_event("status.changed", manager_protocol_status_json());
         } else {
             send_error(id, "not_found", "Device is not in the pairing store");
         }
@@ -170,8 +201,10 @@ void manager_protocol_handle_line(const char *line)
         const char *device_id = json_string(params, "id");
         esp_err_t err = pairing_store_set_connected(device_id, false);
         if (err == ESP_OK) {
+            show_store_led_state();
             send_ok(id, NULL);
             manager_protocol_emit_event("bond.changed", paired_devices_json());
+            manager_protocol_emit_event("status.changed", manager_protocol_status_json());
         } else {
             send_error(id, "not_found", "Device is not in the pairing store");
         }
@@ -184,6 +217,7 @@ void manager_protocol_handle_line(const char *line)
         const char *label = cJSON_IsString(label_item) ? label_item->valuestring : NULL;
         esp_err_t err = pairing_store_update_policy(device_id, label, auto_connect_ptr);
         if (err == ESP_OK) {
+            show_store_led_state();
             send_ok(id, NULL);
             manager_protocol_emit_event("bond.changed", paired_devices_json());
         } else {

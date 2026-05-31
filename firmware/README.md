@@ -22,6 +22,16 @@ The current firmware is a development stub for the management protocol:
 - Exposes JSON Lines commands through the current console stream.
 - Emits mock BLE HID scan results.
 - Supports mock `pair.start`, `bond.delete`, `connect`, `disconnect`, and `policy.set`.
+- Drives the ESP32S3-Zero onboard WS2812 RGB LED on GPIO21 as a status indicator.
+
+## RGB LED状態表示
+
+- 白: 起動中
+- 青: 待機中
+- シアン: スキャン中
+- 紫: ペアリング中
+- 緑: 保存済みデバイスが1台以上接続扱い
+- 赤: コマンドまたはプロトコルエラー
 
 The actual BLE HID Host and USB HID report bridge still need to be wired into:
 

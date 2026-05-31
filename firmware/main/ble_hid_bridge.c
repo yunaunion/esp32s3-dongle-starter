@@ -103,7 +103,6 @@ esp_err_t ble_hid_bridge_scan_start(cJSON *params)
         manager_protocol_emit_event("device.discovered", mock_device_json(&MOCK_DEVICES[index]));
     }
 
-    state = "ready-stub";
     return ESP_OK;
 }
 
@@ -123,6 +122,8 @@ esp_err_t ble_hid_bridge_pair_start(cJSON *params)
         return ESP_ERR_INVALID_ARG;
     }
 
+    state = "pairing-stub";
+
     paired_device_t device = { 0 };
     make_id(device.id, sizeof(device.id), address);
     copy_text(device.address, sizeof(device.address), address);
@@ -134,11 +135,13 @@ esp_err_t ble_hid_bridge_pair_start(cJSON *params)
 
     esp_err_t err = pairing_store_upsert(&device);
     if (err != ESP_OK) {
+        state = "ready-stub";
         return err;
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(pairing_store_set_connected(device.id, true));
 
     manager_protocol_emit_event("bond.changed", NULL);
+    state = "ready-stub";
     ESP_LOGI(TAG, "mock paired %s", address);
     return ESP_OK;
 }
