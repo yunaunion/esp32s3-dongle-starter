@@ -30,13 +30,6 @@
 extern void ble_store_config_init(void);
 
 typedef struct {
-    char address[24];
-    char address_type[12];
-    char name[48];
-    char kind[16];
-} auto_connect_ctx_t;
-
-typedef struct {
     bool in_use;
     char address[24];
     esp_hidh_dev_t *dev;
@@ -47,8 +40,11 @@ static const size_t MAX_DISCOVERY_NAME = 48;
 static const size_t MAX_DISCOVERY_KIND = 16;
 static const size_t MAX_DISCOVERY_ADDRESS = 24;
 static const size_t MAX_DISCOVERY_ADDRESS_TYPE = 12;
-static const uint32_t OPEN_MUTEX_TIMEOUT_MS = 1000;
+static const uint32_t OPEN_MUTEX_TIMEOUT_MS = 10000;
 static const uint32_t SCAN_CANCEL_WAIT_MS = 500;
+static const uint32_t AUTO_RECONNECT_START_DELAY_MS = 1500;
+static const uint32_t AUTO_RECONNECT_INTERVAL_MS = 6000;
+static const uint32_t AUTO_RECONNECT_SCAN_MS = 3500;
 
 static SemaphoreHandle_t s_state_mutex;
 static SemaphoreHandle_t s_open_mutex;
@@ -56,6 +52,7 @@ static SemaphoreHandle_t s_sync_sem;
 static bool s_scan_active;
 static bool s_scan_hid_only = true;
 static bool s_open_in_progress;
+static bool s_auto_reconnect_started;
 static char s_state[16] = "init";
 static active_connection_t s_active_connections[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
 
@@ -162,6 +159,42 @@ static const char *address_type_to_text(uint8_t type)
         return "public";
     }
     return "random";
+}
+
+static void bytes_to_hex_string(const uint8_t *data, size_t length, char *out, size_t out_size)
+{
+    size_t max_bytes;
+    size_t pos = 0;
+
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    out[0] = '\0';
+
+    if (data == NULL || length == 0) {
+        return;
+    }
+
+    max_bytes = (out_size - 1) / 3;
+    if (max_bytes > length) {
+        max_bytes = length;
+    }
+
+    for (size_t index = 0; index < max_bytes; ++index) {
+        int written = snprintf(out + pos, out_size - pos, "%02X", data[index]);
+        if (written <= 0) {
+            break;
+        }
+        pos += (size_t)written;
+        if (index + 1 < max_bytes && pos + 1 < out_size) {
+            out[pos++] = ' ';
+            out[pos] = '\0';
+        }
+    }
+
+    if (max_bytes < length && pos + 4 < out_size) {
+        snprintf(out + pos, out_size - pos, " ...");
+    }
 }
 
 static const char *kind_from_usage(esp_hid_usage_t usage)
@@ -329,6 +362,17 @@ static bool open_in_progress(void)
     return in_progress;
 }
 
+static bool scan_active(void)
+{
+    bool active = false;
+    if (s_state_mutex != NULL) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        active = s_scan_active;
+        xSemaphoreGive(s_state_mutex);
+    }
+    return active;
+}
+
 static void cancel_scan_for_connection(void)
 {
     if (ble_gap_disc_active()) {
@@ -357,8 +401,7 @@ static void disable_auto_connect_after_failure(const paired_device_t *device)
         return;
     }
 
-    bool auto_connect = false;
-    ESP_ERROR_CHECK_WITHOUT_ABORT(pairing_store_update_policy(device->id, NULL, &auto_connect));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(pairing_store_set_connected(device->id, false));
     manager_protocol_emit_event("bond.changed", NULL);
 }
 
@@ -461,34 +504,24 @@ static esp_err_t open_device_blocking(const paired_device_t *device, bool store_
 
 static void auto_connect_task(void *arg)
 {
-    auto_connect_ctx_t *ctx = (auto_connect_ctx_t *)arg;
-    paired_device_t device = { 0 };
+    paired_device_t *device = (paired_device_t *)arg;
 
-    make_id(device.id, sizeof(device.id), ctx->address);
-    copy_text(device.address, sizeof(device.address), ctx->address);
-    copy_text(device.address_type, sizeof(device.address_type), ctx->address_type);
-    copy_text(device.name, sizeof(device.name), ctx->name);
-    copy_text(device.kind, sizeof(device.kind), ctx->kind);
-    device.auto_connect = true;
-    device.connected = false;
+    (void)open_device_blocking(device, true);
 
-    (void)open_device_blocking(&device, false);
-
-    free(ctx);
+    free(device);
     vTaskDelete(NULL);
 }
 
 static esp_err_t schedule_auto_connect(const paired_device_t *device)
 {
-    auto_connect_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    paired_device_t *ctx = calloc(1, sizeof(*ctx));
     if (ctx == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
-    copy_text(ctx->address, sizeof(ctx->address), device->address);
-    copy_text(ctx->address_type, sizeof(ctx->address_type), device->address_type);
-    copy_text(ctx->name, sizeof(ctx->name), device->name);
-    copy_text(ctx->kind, sizeof(ctx->kind), device->kind);
+    *ctx = *device;
+    ctx->auto_connect = true;
+    ctx->connected = false;
 
     if (xTaskCreate(auto_connect_task, "ble_auto_connect", 8192, ctx, 4, NULL) != pdPASS) {
         free(ctx);
@@ -498,12 +531,38 @@ static esp_err_t schedule_auto_connect(const paired_device_t *device)
     return ESP_OK;
 }
 
+static const paired_device_t *find_auto_connect_record(const char *name, const char *address, const char *kind)
+{
+    const paired_device_t *record = pairing_store_find_by_address(address);
+    if (record != NULL) {
+        return record;
+    }
+
+    if (name == NULL || name[0] == '\0') {
+        return NULL;
+    }
+
+    for (size_t index = 0; index < pairing_store_count(); ++index) {
+        const paired_device_t *candidate = pairing_store_get(index);
+        if (candidate == NULL || !candidate->auto_connect || candidate->connected) {
+            continue;
+        }
+        if (candidate->name[0] == '\0' || strcmp(candidate->name, name) != 0) {
+            continue;
+        }
+        if (kind != NULL && kind[0] != '\0' &&
+                candidate->kind[0] != '\0' && strcmp(candidate->kind, kind) != 0) {
+            continue;
+        }
+        return candidate;
+    }
+
+    return NULL;
+}
+
 static void maybe_auto_connect(const char *name, const char *address, const char *address_type, const char *kind)
 {
-    (void)name;
-    (void)kind;
-
-    const paired_device_t *record = pairing_store_find_by_address(address);
+    const paired_device_t *record = find_auto_connect_record(name, address, kind);
     if (record == NULL || !record->auto_connect || record->connected || open_in_progress()) {
         return;
     }
@@ -519,6 +578,39 @@ static void maybe_auto_connect(const char *name, const char *address, const char
     }
 
     (void)schedule_auto_connect(&request);
+}
+
+static bool has_auto_connect_target(void)
+{
+    for (size_t index = 0; index < pairing_store_count(); ++index) {
+        const paired_device_t *device = pairing_store_get(index);
+        if (device == NULL || !device->auto_connect || device->connected) {
+            continue;
+        }
+        if (find_active_connection(device->address) == NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void auto_reconnect_scan_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(AUTO_RECONNECT_START_DELAY_MS));
+
+    while (true) {
+        if (has_auto_connect_target() && !open_in_progress() && !scan_active()) {
+            cJSON *params = cJSON_CreateObject();
+            if (params != NULL) {
+                cJSON_AddNumberToObject(params, "durationMs", AUTO_RECONNECT_SCAN_MS);
+                cJSON_AddBoolToObject(params, "hidOnly", true);
+                ESP_ERROR_CHECK_WITHOUT_ABORT(ble_hid_bridge_scan_start(params));
+                cJSON_Delete(params);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(AUTO_RECONNECT_INTERVAL_MS));
+    }
 }
 
 static int scan_gap_event(struct ble_gap_event *event, void *arg)
@@ -677,6 +769,8 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
 
     case ESP_HIDH_INPUT_EVENT:
         if (param->input.dev != NULL) {
+            esp_err_t forward_err;
+            char raw_hex[64] = { 0 };
             bda = esp_hidh_dev_bda_get(param->input.dev);
             bda_to_string(bda, address, sizeof(address));
             ESP_LOGI(TAG, "INPUT %s usage=%s map=%u id=%u len=%u", address,
@@ -684,10 +778,42 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
                      (unsigned)param->input.map_index,
                      (unsigned)param->input.report_id,
                      (unsigned)param->input.length);
-            ESP_ERROR_CHECK_WITHOUT_ABORT(usb_hid_bridge_forward_input(param->input.usage,
-                                            param->input.report_id,
-                                            param->input.data,
-                                            param->input.length));
+            forward_err = usb_hid_bridge_forward_input(param->input.usage,
+                          param->input.report_id,
+                          param->input.data,
+                          param->input.length);
+
+            if (forward_err == ESP_ERR_NOT_SUPPORTED) {
+                /* Some BLE mice/controllers are reported as GENERIC usage. */
+                if (param->input.length >= 3) {
+                    forward_err = usb_hid_bridge_forward_input(ESP_HID_USAGE_MOUSE,
+                                  param->input.report_id,
+                                  param->input.data,
+                                  param->input.length);
+                    if (forward_err == ESP_OK) {
+                        ESP_LOGW(TAG, "INPUT fallback as mouse applied for %s", address);
+                    }
+                }
+            }
+
+            if (forward_err != ESP_OK) {
+                ESP_LOGW(TAG, "INPUT forward failed (%s) usage=%s len=%u", esp_err_to_name(forward_err),
+                         esp_hid_usage_str(param->input.usage), (unsigned)param->input.length);
+            } else {
+                status_led_activity();
+            }
+
+            cJSON *debug = cJSON_CreateObject();
+            if (debug != NULL) {
+                bytes_to_hex_string(param->input.data, param->input.length, raw_hex, sizeof(raw_hex));
+                cJSON_AddStringToObject(debug, "address", address);
+                cJSON_AddStringToObject(debug, "usage", esp_hid_usage_str(param->input.usage));
+                cJSON_AddNumberToObject(debug, "reportId", (double)param->input.report_id);
+                cJSON_AddNumberToObject(debug, "length", (double)param->input.length);
+                cJSON_AddStringToObject(debug, "raw", raw_hex);
+                cJSON_AddStringToObject(debug, "forward", esp_err_to_name(forward_err));
+                manager_protocol_emit_event("input.debug", debug);
+            }
         }
         break;
 
@@ -818,6 +944,12 @@ esp_err_t ble_hid_bridge_init(void)
     }
 
     ESP_LOGI(TAG, "BLE HID bridge ready");
+    if (!s_auto_reconnect_started) {
+        ESP_RETURN_ON_FALSE(
+            xTaskCreate(auto_reconnect_scan_task, "ble_reconnect", 8192, NULL, 3, NULL) == pdPASS,
+            ESP_ERR_NO_MEM, TAG, "Auto reconnect task create failed");
+        s_auto_reconnect_started = true;
+    }
     return ESP_OK;
 }
 

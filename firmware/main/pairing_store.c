@@ -47,7 +47,7 @@ static void load_device_from_json(cJSON *item, paired_device_t *device)
     copy_text(device->kind, sizeof(device->kind), json_string(item, "kind"));
 
     cJSON *auto_connect = cJSON_GetObjectItemCaseSensitive(item, "autoConnect");
-    device->auto_connect = cJSON_IsTrue(auto_connect);
+    device->auto_connect = cJSON_IsBool(auto_connect) ? cJSON_IsTrue(auto_connect) : true;
     device->connected = false;
 }
 

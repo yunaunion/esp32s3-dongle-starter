@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ESP32-S3 BLE HIDドングル管理</title>
+  <title>ESP32-S3 BLE HID ドングル管理</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">ESP32-S3</p>
-        <h1>BLE HIDドングル管理</h1>
+        <h1>BLE HID ドングル管理</h1>
       </div>
       <div class="topbar-actions">
         <span id="connectionBadge" class="badge badge-idle">未接続</span>
@@ -34,8 +34,16 @@
         <strong id="usbValue">-</strong>
       </div>
       <div class="metric">
-        <span class="metric-label">保存数</span>
-        <strong id="pairedCountValue">0</strong>
+        <span class="metric-label">登録 / 接続</span>
+        <strong id="pairedCountValue">0 / 0</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">自動再接続</span>
+        <strong id="autoReconnectValue">-</strong>
+      </div>
+      <div class="metric">
+        <span class="metric-label">最大同時接続</span>
+        <strong id="maxConnectionsValue">-</strong>
       </div>
     </section>
 

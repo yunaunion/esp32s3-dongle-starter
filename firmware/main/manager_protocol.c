@@ -17,6 +17,8 @@
 
 #define FIRMWARE_VERSION "0.1.0"
 #define PROTOCOL_VERSION 1
+#define AUTO_RECONNECT_INTERVAL_MS 6000
+#define AUTO_RECONNECT_SCAN_MS 3500
 
 static const char *TAG = "manager";
 static SemaphoreHandle_t s_stdout_mutex;
@@ -165,6 +167,9 @@ cJSON *manager_protocol_status_json(void)
     cJSON_AddStringToObject(status, "lastBlePhase", esp_ble_hidh_debug_phase());
     cJSON_AddNumberToObject(status, "pairedCount", pairing_store_count());
     cJSON_AddNumberToObject(status, "connectedCount", connected_device_count());
+    cJSON_AddNumberToObject(status, "autoReconnectIntervalMs", AUTO_RECONNECT_INTERVAL_MS);
+    cJSON_AddNumberToObject(status, "autoReconnectScanMs", AUTO_RECONNECT_SCAN_MS);
+    cJSON_AddNumberToObject(status, "maxBleConnections", CONFIG_BT_NIMBLE_MAX_CONNECTIONS);
     return status;
 }
 
@@ -256,6 +261,8 @@ void manager_protocol_handle_line(const char *line)
         if (err == ESP_OK) {
             send_ok(id, NULL);
             manager_protocol_emit_event("status.changed", manager_protocol_status_json());
+        } else if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_STATE) {
+            send_error(id, "busy", "Another BLE operation is in progress");
         } else {
             send_error(id, "pair_failed", "BLE HID pairing could not be completed");
         }
@@ -283,6 +290,8 @@ void manager_protocol_handle_line(const char *line)
         if (err == ESP_OK) {
             send_ok(id, NULL);
             manager_protocol_emit_event("status.changed", manager_protocol_status_json());
+        } else if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_STATE) {
+            send_error(id, "busy", "Another BLE operation is in progress");
         } else {
             send_error(id, "not_found", "Device is not in the pairing store");
         }
@@ -293,6 +302,8 @@ void manager_protocol_handle_line(const char *line)
         if (err == ESP_OK) {
             send_ok(id, NULL);
             manager_protocol_emit_event("status.changed", manager_protocol_status_json());
+        } else if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_STATE) {
+            send_error(id, "busy", "Another BLE operation is in progress");
         } else {
             send_error(id, "not_found", "Device is not in the pairing store");
         }

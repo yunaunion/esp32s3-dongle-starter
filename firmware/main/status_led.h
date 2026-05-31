@@ -14,3 +14,4 @@ typedef enum {
 
 esp_err_t status_led_init(void);
 void status_led_set(status_led_state_t state);
+void status_led_activity(void);

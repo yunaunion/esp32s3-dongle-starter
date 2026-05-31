@@ -40,6 +40,7 @@
 #define ESP_BD_ADDR_STR         "%02x:%02x:%02x:%02x:%02x:%02x"
 #define ESP_BD_ADDR_HEX(addr)   addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]
 #define HIDH_CB_TIMEOUT_MS      10000
+#define HIDH_SECURITY_WAIT_MS   8000
 
 static const char *TAG = "NIMBLE_HIDH";
 static SemaphoreHandle_t s_ble_hidh_cb_semaphore = NULL;
@@ -52,6 +53,22 @@ static void set_debug_phase(const char *phase)
 {
     s_debug_phase_magic = DEBUG_PHASE_MAGIC;
     snprintf(s_debug_phase, sizeof(s_debug_phase), "%s", phase != NULL ? phase : "");
+}
+
+static bool wait_for_link_encryption(uint16_t conn_id, uint32_t timeout_ms)
+{
+    struct ble_gap_conn_desc desc = {0};
+
+    for (uint32_t elapsed = 0; elapsed < timeout_ms; elapsed += 20) {
+        if (ble_gap_conn_find(conn_id, &desc) == 0) {
+            if (desc.sec_state.encrypted || desc.sec_state.bonded) {
+                return true;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    return false;
 }
 
 const char *esp_ble_hidh_debug_phase(void)
@@ -390,6 +407,10 @@ static void read_device_services(esp_hidh_dev_t *dev)
 
         /* read characteristic value may fail, so we should init report maps */
         memset(dev->config.report_maps, 0, dev->config.report_maps_len * sizeof(esp_hid_raw_report_map_t));
+        for (uint16_t idx = 0; idx < dev->config.report_maps_len; idx++) {
+            /* Most BLE HID devices run in report protocol mode. */
+            dev->protocol_mode[idx] = ESP_HID_PROTOCOL_MODE_REPORT;
+        }
 
         for (uint16_t s = 0; s < dcount; s++) {
             set_debug_phase("services.loop");
@@ -464,8 +485,17 @@ static void read_device_services(esp_hidh_dev_t *dev)
                     } else {
                         if (cuuid == BLE_SVC_HID_CHR_UUID16_PROTOCOL_MODE) {
                             if (char_result[c].properties & BLE_GATT_CHR_PROP_READ) {
+                                rdata = NULL;
+                                rlen = 0;
                                 if (read_char(dev->ble.conn_id, chandle, &rdata, &rlen) == 0 && rlen) {
-                                    dev->protocol_mode[hidindex] = *((uint8_t *)rdata);
+                                    uint8_t mode = *((uint8_t *)rdata);
+                                    if (mode == ESP_HID_PROTOCOL_MODE_BOOT || mode == ESP_HID_PROTOCOL_MODE_REPORT) {
+                                        dev->protocol_mode[hidindex] = mode;
+                                    }
+                                }
+                                if (rdata != NULL) {
+                                    free(rdata);
+                                    rdata = NULL;
                                 }
                             }
                             continue;
@@ -707,7 +737,7 @@ static void attach_report_listeners(esp_hidh_dev_t *dev)
     while (report) {
         set_debug_phase("attach.report");
         /* subscribe to notifications */
-        if ((report->permissions & BLE_GATT_CHR_PROP_NOTIFY) != 0 && report->protocol_mode == ESP_HID_PROTOCOL_MODE_REPORT) {
+        if ((report->permissions & BLE_GATT_CHR_PROP_NOTIFY) != 0) {
             register_for_notify(dev->ble.conn_id, report->handle);
             if (report->ccc_handle) {
                 /* Write CCC descr to enable notifications */
@@ -758,6 +788,14 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
             }
             dev->status = -1; // set to not found and clear if HID service is found
             dev->ble.conn_id = event->connect.conn_handle;
+
+            rc = ble_gap_security_initiate(event->connect.conn_handle);
+            if (rc == 0 || rc == BLE_HS_EALREADY) {
+                set_debug_phase("gap.security_started");
+            } else {
+                set_debug_phase("gap.security_failed");
+                ESP_LOGW(TAG, "ble_gap_security_initiate failed: %d", rc);
+            }
 
             /* Keep discovery as the first GATT procedure. Starting MTU exchange here can
              * overlap with service discovery for some HID devices and trigger NimBLE panics.
@@ -843,11 +881,17 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
                 if (report) {
                     esp_hidh_event_data_t *p_param = NULL;
                     size_t event_data_size = sizeof(esp_hidh_event_data_t);
+                    bool protocol_mismatch = false;
 
-                    if (report->protocol_mode != dev->protocol_mode[report->map_index]) {
-                        /* only pass the notifications in the current protocol mode */
-                        ESP_LOGD(TAG, "Wrong protocol mode, dropping notification");
-                        return 0;
+                    if (dev->protocol_mode != NULL && report->map_index < dev->config.report_maps_len) {
+                        uint8_t current_mode = dev->protocol_mode[report->map_index];
+                        if ((current_mode == ESP_HID_PROTOCOL_MODE_BOOT || current_mode == ESP_HID_PROTOCOL_MODE_REPORT)
+                                && report->protocol_mode != current_mode) {
+                            protocol_mismatch = true;
+                        }
+                    }
+                    if (protocol_mismatch) {
+                        ESP_LOGD(TAG, "Protocol mode mismatch, passing notification anyway");
                     }
                     if (OS_MBUF_PKTLEN(event->notify_rx.om)) {
                         event_data_size += OS_MBUF_PKTLEN(event->notify_rx.om);
@@ -896,6 +940,11 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
                     event->mtu.conn_handle,
                     event->mtu.channel_id,
                     event->mtu.value);
+        return 0;
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        set_debug_phase("gap.enc_change");
+        MODLOG_DFLT(INFO, "encryption change event; status=%d conn_handle=%d\n",
+                    event->enc_change.status, event->enc_change.conn_handle);
         return 0;
     default:
         return 0;
@@ -1059,6 +1108,14 @@ esp_hidh_dev_t *esp_ble_hidh_dev_open(uint8_t *bda, uint8_t address_type)
         ESP_LOGE(TAG, "dev open failed! status: 0x%x", dev->status);
         esp_hidh_dev_free_inner(dev);
         return NULL;
+    }
+
+    set_debug_phase("open.security_wait");
+    if (wait_for_link_encryption(dev->ble.conn_id, HIDH_SECURITY_WAIT_MS)) {
+        set_debug_phase("open.security_ready");
+    } else {
+        set_debug_phase("open.security_timeout");
+        ESP_LOGW(TAG, "BLE link encryption wait timed out");
     }
 
     dev->close = esp_ble_hidh_dev_close;

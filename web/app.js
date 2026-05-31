@@ -3,7 +3,7 @@ const PROTOCOL_VERSION = 1;
 const COMMAND_LABELS = {
   hello: "接続確認",
   "dongle.status": "状態取得",
-  "bond.list": "保存済み一覧取得",
+  "bond.list": "ペアリング一覧",
   "scan.start": "スキャン開始",
   "scan.stop": "スキャン停止",
   "pair.start": "ペアリング",
@@ -14,7 +14,7 @@ const COMMAND_LABELS = {
 };
 
 const KIND_LABELS = {
-  hid: "HID機器",
+  hid: "HID",
   keyboard: "キーボード",
   mouse: "マウス",
   gamepad: "ゲームパッド",
@@ -22,31 +22,37 @@ const KIND_LABELS = {
 
 const ADDRESS_TYPE_LABELS = {
   random: "ランダム",
-  public: "公開",
+  public: "パブリック",
 };
 
 const BLE_STATE_LABELS = {
-  stub: "初期化中（開発版）",
-  "ready-stub": "待機中（開発版）",
-  "scanning-stub": "スキャン中（開発版）",
-  "pairing-stub": "ペアリング中（開発版）",
   ready: "待機中",
   scanning: "スキャン中",
-  pairing: "ペアリング中",
+  pairing: "接続処理中",
+  connected: "接続中",
+  stub: "開発モード",
+  "ready-stub": "待機中（開発）",
+  "scanning-stub": "スキャン中（開発）",
+  "pairing-stub": "接続処理中（開発）",
 };
 
 const USB_STATE_LABELS = {
-  "cdc+hid": "管理通信 + HID",
+  "cdc+hid": "管理シリアル + USB HID",
 };
 
 const state = {
   connected: false,
   demo: false,
+  queuedRequests: 0,
+  activeRequests: 0,
   status: {
     firmware: "-",
     ble: "-",
     usb: "-",
     pairedCount: 0,
+    connectedCount: 0,
+    autoReconnectIntervalMs: 0,
+    maxBleConnections: 0,
   },
   paired: [],
   discovered: [],
@@ -65,12 +71,18 @@ const els = {
   bleValue: document.querySelector("#bleValue"),
   usbValue: document.querySelector("#usbValue"),
   pairedCountValue: document.querySelector("#pairedCountValue"),
+  autoReconnectValue: document.querySelector("#autoReconnectValue"),
+  maxConnectionsValue: document.querySelector("#maxConnectionsValue"),
   pairedList: document.querySelector("#pairedList"),
   scanList: document.querySelector("#scanList"),
   logOutput: document.querySelector("#logOutput"),
   pairedTemplate: document.querySelector("#pairedDeviceTemplate"),
   scanTemplate: document.querySelector("#scanDeviceTemplate"),
 };
+
+let requestQueue = Promise.resolve();
+let refreshTimer = null;
+let refreshInFlight = false;
 
 class SerialTransport {
   constructor() {
@@ -86,7 +98,7 @@ class SerialTransport {
 
   async connect() {
     if (!("serial" in navigator)) {
-      throw new Error("このブラウザはWeb Serial APIに対応していません。ChromeまたはEdgeを使用してください。");
+      throw new Error("このブラウザはWeb Serial APIに対応していません。ChromeまたはEdgeを使ってください。");
     }
 
     this.port = await navigator.serial.requestPort();
@@ -208,7 +220,7 @@ els.demoButton.addEventListener("click", () => {
   } else {
     state.paired = [];
     state.discovered = [];
-    state.status = { firmware: "-", ble: "-", usb: "-", pairedCount: 0 };
+    state.status = { firmware: "-", ble: "-", usb: "-", pairedCount: 0, connectedCount: 0 };
   }
   render();
 });
@@ -228,27 +240,72 @@ async function request(command, params = {}, options = {}) {
   if (!state.connected) {
     throw new Error("ドングルに接続していません。");
   }
-  return transport.request(command, params, options.timeoutMs ?? 8000);
+
+  state.queuedRequests += 1;
+  renderControls();
+
+  const run = async () => {
+    state.queuedRequests = Math.max(0, state.queuedRequests - 1);
+    state.activeRequests += 1;
+    renderControls();
+    try {
+      return await transport.request(command, params, options.timeoutMs ?? 8000);
+    } finally {
+      state.activeRequests = Math.max(0, state.activeRequests - 1);
+      renderControls();
+    }
+  };
+
+  const queued = requestQueue.then(run, run);
+  requestQueue = queued.catch(() => {});
+  return queued;
+}
+
+function interactionLocked() {
+  return state.status.ble === "pairing" || state.activeRequests > 0 || state.queuedRequests > 0;
+}
+
+function scheduleRefresh(delayMs = 120) {
+  if (refreshTimer !== null) {
+    window.clearTimeout(refreshTimer);
+  }
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null;
+    refreshAll().catch(showError);
+  }, delayMs);
 }
 
 async function refreshAll() {
+  if (refreshInFlight) {
+    return;
+  }
+  refreshInFlight = true;
   try {
     const status = await request("dongle.status");
     applyStatus(status);
     const list = await request("bond.list");
     state.paired = list.devices ?? [];
     state.status.pairedCount = state.paired.length;
+    removePairedFromDiscovered();
     render();
   } catch (error) {
     showError(error);
+  } finally {
+    refreshInFlight = false;
   }
 }
 
 async function startScan(options = {}) {
+  if (interactionLocked()) {
+    showError(new Error("BLE処理中です。完了後に再実行してください。"));
+    return;
+  }
   try {
-    state.discovered = [];
-    renderScanList();
-    await request("scan.start", { durationMs: 5000, hidOnly: true });
+    if (!options.keepResults) {
+      state.discovered = [];
+      renderScanList();
+    }
+    await request("scan.start", { durationMs: 8000, hidOnly: true });
     logLine(options.automatic ? "接続後の自動スキャンを開始しました" : "スキャンを開始しました");
   } catch (error) {
     showError(error);
@@ -265,13 +322,19 @@ async function stopScan() {
 }
 
 async function pairDevice(device) {
+  if (interactionLocked()) {
+    showError(new Error("BLE処理中です。完了後に再実行してください。"));
+    return;
+  }
   try {
     await request("pair.start", {
       address: device.address,
       addressType: device.addressType,
       name: device.name,
       kind: device.kind,
-    }, { timeoutMs: 45000 });
+      autoConnect: true,
+    }, { timeoutMs: 90000 });
+    state.discovered = state.discovered.filter((item) => !sameDevice(item, device));
     await refreshAll();
   } catch (error) {
     showError(error);
@@ -279,6 +342,10 @@ async function pairDevice(device) {
 }
 
 async function deleteDevice(device) {
+  if (interactionLocked()) {
+    showError(new Error("BLE処理中です。完了後に再実行してください。"));
+    return;
+  }
   try {
     await request("bond.delete", { id: device.id });
     state.paired = state.paired.filter((item) => item.id !== device.id);
@@ -290,6 +357,10 @@ async function deleteDevice(device) {
 }
 
 async function setPolicy(device, patch) {
+  if (interactionLocked()) {
+    showError(new Error("BLE処理中です。完了後に再実行してください。"));
+    return;
+  }
   try {
     await request("policy.set", { id: device.id, ...patch });
     state.paired = state.paired.map((item) => item.id === device.id ? { ...item, ...patch } : item);
@@ -318,7 +389,7 @@ function handleMessage(line) {
     upsertDiscovered(message.data);
   }
   if (message.event === "bond.changed") {
-    refreshAll();
+    scheduleRefresh();
   }
   if (message.event === "status.changed") {
     applyStatus(message.data);
@@ -332,6 +403,10 @@ function applyStatus(status) {
     ble: status.ble ?? "-",
     usb: status.usb ?? "-",
     pairedCount: status.pairedCount ?? state.paired.length,
+    connectedCount: status.connectedCount ?? state.status.connectedCount ?? 0,
+    autoReconnectIntervalMs: status.autoReconnectIntervalMs ?? state.status.autoReconnectIntervalMs ?? 0,
+    autoReconnectScanMs: status.autoReconnectScanMs ?? state.status.autoReconnectScanMs ?? 0,
+    maxBleConnections: status.maxBleConnections ?? state.status.maxBleConnections ?? 0,
   };
 }
 
@@ -340,7 +415,7 @@ function commandLabel(command) {
 }
 
 function kindLabel(kind) {
-  return KIND_LABELS[kind] ?? (kind || "HID機器");
+  return KIND_LABELS[kind] ?? (kind || "HID");
 }
 
 function addressTypeLabel(addressType) {
@@ -355,7 +430,31 @@ function usbStateLabel(value) {
   return USB_STATE_LABELS[value] ?? (value || "-");
 }
 
+function sameDevice(a, b) {
+  if (!a || !b) {
+    return false;
+  }
+  if (a.address && b.address && a.address.toLowerCase() === b.address.toLowerCase()) {
+    return true;
+  }
+  return Boolean(a.name && b.name && a.name === b.name && (!a.kind || !b.kind || a.kind === b.kind));
+}
+
+function isPairedDevice(device) {
+  return state.paired.some((paired) => sameDevice(device, paired));
+}
+
+function removePairedFromDiscovered() {
+  state.discovered = state.discovered.filter((device) => !isPairedDevice(device));
+}
+
 function upsertDiscovered(device) {
+  if (!device || !device.address || isPairedDevice(device)) {
+    removePairedFromDiscovered();
+    renderScanList();
+    return;
+  }
+
   const key = `${device.addressType}:${device.address}`;
   const next = state.discovered.filter((item) => `${item.addressType}:${item.address}` !== key);
   next.unshift(device);
@@ -375,7 +474,11 @@ function render() {
   els.firmwareValue.textContent = state.status.firmware;
   els.bleValue.textContent = bleStateLabel(state.status.ble);
   els.usbValue.textContent = usbStateLabel(state.status.usb);
-  els.pairedCountValue.textContent = String(state.status.pairedCount);
+  els.pairedCountValue.textContent = `${state.status.pairedCount} / ${state.status.connectedCount ?? 0}`;
+  els.autoReconnectValue.textContent = state.status.autoReconnectIntervalMs
+    ? `${Math.round(state.status.autoReconnectIntervalMs / 1000)}秒ごと`
+    : "-";
+  els.maxConnectionsValue.textContent = state.status.maxBleConnections ? `${state.status.maxBleConnections}台` : "-";
   renderControls();
   renderPairedList();
   renderScanList();
@@ -384,47 +487,59 @@ function render() {
 
 function renderControls() {
   const enabled = state.connected || state.demo;
-  els.refreshButton.disabled = !enabled;
-  els.scanButton.disabled = !enabled;
-  els.stopScanButton.disabled = !enabled;
+  const busy = state.activeRequests > 0;
+  const pairing = state.status.ble === "pairing";
+  els.refreshButton.disabled = !enabled || busy;
+  els.scanButton.disabled = !enabled || busy || pairing;
+  els.stopScanButton.disabled = !enabled || busy;
   els.demoButton.textContent = state.demo ? "デモ終了" : "デモ";
 }
 
 function renderPairedList() {
   els.pairedList.innerHTML = "";
   if (!state.paired.length) {
-    els.pairedList.append(emptyState("保存済みデバイスはありません"));
+    els.pairedList.append(emptyState("ペアリング済みデバイスはありません"));
     return;
   }
 
+  const locked = interactionLocked();
   for (const device of state.paired) {
     const row = els.pairedTemplate.content.firstElementChild.cloneNode(true);
     row.querySelector(".device-name").textContent = device.label || device.name || device.address;
     row.querySelector(".device-meta").textContent = [
       kindLabel(device.kind),
-      device.connected ? "接続中" : "待機中",
+      device.connected ? "接続中" : device.autoConnect ? "自動接続待ち" : "待機中",
       device.address,
     ].filter(Boolean).join(" / ");
 
     const autoConnect = row.querySelector(".auto-connect");
-    autoConnect.checked = Boolean(device.autoConnect);
+    autoConnect.checked = device.autoConnect !== false;
+    autoConnect.disabled = locked;
     autoConnect.addEventListener("change", () => setPolicy(device, { autoConnect: autoConnect.checked }));
 
-    row.querySelector(".connect-device").addEventListener("click", () => request("connect", { id: device.id }, { timeoutMs: 45000 }).then(refreshAll).catch(showError));
-    row.querySelector(".disconnect-device").addEventListener("click", () => request("disconnect", { id: device.id }, { timeoutMs: 10000 }).then(refreshAll).catch(showError));
-    row.querySelector(".delete-device").addEventListener("click", () => deleteDevice(device));
+    const connectBtn = row.querySelector(".connect-device");
+    const disconnectBtn = row.querySelector(".disconnect-device");
+    const deleteBtn = row.querySelector(".delete-device");
+    connectBtn.disabled = locked || device.connected;
+    disconnectBtn.disabled = locked || !device.connected;
+    deleteBtn.disabled = locked;
+    connectBtn.addEventListener("click", () => request("connect", { id: device.id }, { timeoutMs: 45000 }).then(refreshAll).catch(showError));
+    disconnectBtn.addEventListener("click", () => request("disconnect", { id: device.id }, { timeoutMs: 10000 }).then(refreshAll).catch(showError));
+    deleteBtn.addEventListener("click", () => deleteDevice(device));
     els.pairedList.append(row);
   }
 }
 
 function renderScanList() {
   els.scanList.innerHTML = "";
-  if (!state.discovered.length) {
-    els.scanList.append(emptyState("検出されたBLE HID機器はありません"));
+  const unpaired = state.discovered.filter((device) => !isPairedDevice(device));
+  if (!unpaired.length) {
+    els.scanList.append(emptyState("検出された未登録デバイスはありません"));
     return;
   }
 
-  for (const device of state.discovered) {
+  const locked = interactionLocked();
+  for (const device of unpaired) {
     const row = els.scanTemplate.content.firstElementChild.cloneNode(true);
     row.querySelector(".device-name").textContent = device.name || device.address;
     row.querySelector(".device-meta").textContent = [
@@ -433,7 +548,9 @@ function renderScanList() {
       device.address,
       Number.isFinite(device.rssi) ? `${device.rssi} dBm` : "",
     ].filter(Boolean).join(" / ");
-    row.querySelector(".pair-device").addEventListener("click", () => pairDevice(device));
+    const pairBtn = row.querySelector(".pair-device");
+    pairBtn.disabled = locked;
+    pairBtn.addEventListener("click", () => pairDevice(device));
     els.scanList.append(row);
   }
 }
@@ -453,7 +570,7 @@ function emptyState(text) {
 function logLine(text) {
   const stamp = new Date().toLocaleTimeString("ja-JP", { hour12: false });
   state.logs.push(`[${stamp}] ${text}`);
-  state.logs = state.logs.slice(-200);
+  state.logs = state.logs.slice(-220);
   renderLog();
 }
 
@@ -467,6 +584,9 @@ function loadDemoState() {
     ble: "ready",
     usb: "cdc+hid",
     pairedCount: 2,
+    connectedCount: 1,
+    autoReconnectIntervalMs: 6000,
+    maxBleConnections: 5,
   };
   state.paired = [
     {
@@ -510,7 +630,7 @@ function loadDemoState() {
 
 async function demoRequest(command, params) {
   await new Promise((resolve) => window.setTimeout(resolve, 180));
-  logLine(`デモ処理: ${commandLabel(command)} ${JSON.stringify(params)}`);
+  logLine(`デモ送信 ${commandLabel(command)} ${JSON.stringify(params)}`);
 
   if (command === "dongle.status") {
     return state.status;
@@ -538,6 +658,8 @@ async function demoRequest(command, params) {
         connected: true,
       });
       state.status.pairedCount = state.paired.length;
+      state.status.connectedCount += 1;
+      removePairedFromDiscovered();
     }
     return { paired: true };
   }
@@ -546,6 +668,7 @@ async function demoRequest(command, params) {
   }
   if (command === "connect" || command === "disconnect") {
     state.paired = state.paired.map((item) => item.id === params.id ? { ...item, connected: command === "connect" } : item);
+    state.status.connectedCount = state.paired.filter((item) => item.connected).length;
     return { ok: true };
   }
   if (command === "policy.set") {
