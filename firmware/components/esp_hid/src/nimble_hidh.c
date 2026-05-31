@@ -19,6 +19,7 @@
 
 #include <assert.h>
 #include <string.h>
+#include <stdlib.h>
 #include <errno.h>
 #include "nimble/nimble_opt.h"
 #include "host/ble_hs.h"
@@ -103,6 +104,11 @@ nimble_on_read(uint16_t conn_handle,
     s_read_status = error->status;
     switch (s_read_status) {
     case 0:
+        if (attr == NULL || attr->om == NULL) {
+            s_read_status = BLE_HS_EUNKNOWN;
+            SEND_CB();
+            return 0;
+        }
         MODLOG_DFLT(DEBUG, " attr_handle=%d value=", attr->handle);
         old_offset = s_read_data_len;
         s_read_data_len += OS_MBUF_PKTLEN(attr->om);
@@ -111,6 +117,10 @@ nimble_on_read(uint16_t conn_handle,
         print_mbuf(attr->om);
         return 0;
     case BLE_HS_EDONE:
+        if (s_read_data_val == NULL) {
+            s_read_data_val = calloc(1, 1);
+            s_read_data_len = 0;
+        }
         s_read_data_val[s_read_data_len] = 0; // to insure strings are ended with \0 */
         s_read_status = 0;
         SEND_CB();
@@ -309,12 +319,14 @@ static void read_device_services(esp_hidh_dev_t *dev)
     rc = ble_gattc_disc_all_svcs(dev->ble.conn_id, svc_disced, service_result);
     if (rc != 0) {
         ESP_LOGD(TAG, "Error discovering services : %d", rc);
-        assert(rc != 0);
+        dev->status = rc;
+        return;
     }
     WAIT_CB();
     if (status != 0) {
         ESP_LOGE(TAG, "failed to find services");
-        assert(status == 0);
+        dev->status = status;
+        return;
     }
     dcount = services_discovered; /* fatal if services are more than 10 */
 
@@ -353,7 +365,8 @@ static void read_device_services(esp_hidh_dev_t *dev)
             WAIT_CB();
             if (status != 0) {
                 ESP_LOGE(TAG, "failed to find chars for service : %d", s);
-                assert(status == 0);
+                dev->status = status;
+                return;
             }
             ccount = chrs_discovered;
             if (rc == ESP_OK) {
@@ -467,7 +480,8 @@ static void read_device_services(esp_hidh_dev_t *dev)
                     WAIT_CB();
                     if (status != 0) {
                         ESP_LOGE(TAG, "failed to find descriptors for characteristic : %d", c);
-                        assert(status == 0);
+                        dev->status = status;
+                        return;
                     }
                     dcount = dscs_discovered;
                     if (rc == ESP_OK) {
@@ -555,11 +569,15 @@ on_subscribe(uint16_t conn_handle,
     uint16_t conn_id;
     conn_id = *((uint16_t*) arg);
 
-    assert(conn_id == conn_handle);
+    if (conn_id != conn_handle) {
+        ESP_LOGE(TAG, "Subscribe callback conn mismatch: expected=%u actual=%u", conn_id, conn_handle);
+        SEND_CB();
+        return 0;
+    }
 
     MODLOG_DFLT(INFO, "Subscribe complete; status=%d conn_handle=%d "
                 "attr_handle=%d\n",
-                error->status, conn_handle, attr->handle);
+                error->status, conn_handle, attr != NULL ? attr->handle : 0);
     SEND_CB();
 
     return 0;
@@ -575,6 +593,7 @@ static void register_for_notify(uint16_t conn_handle, uint16_t handle)
     if (rc != 0) {
         ESP_LOGE(TAG, "Error: Failed to subscribe to characteristic; "
                  "rc=%d\n", rc);
+        return;
     }
     WAIT_CB();
 }
@@ -588,18 +607,26 @@ on_write(uint16_t conn_handle,
     uint16_t conn_id;
     conn_id = *((uint16_t*) arg);
 
-    assert(conn_id == conn_handle);
+    if (conn_id != conn_handle) {
+        ESP_LOGE(TAG, "Write callback conn mismatch: expected=%u actual=%u", conn_id, conn_handle);
+        SEND_CB();
+        return 0;
+    }
 
     MODLOG_DFLT(DEBUG, "write complete; status=%d conn_handle=%d "
                 "attr_handle=%d\n",
-                error->status, conn_handle, attr->handle);
+                error->status, conn_handle, attr != NULL ? attr->handle : 0);
     SEND_CB();
 
     return 0;
 }
 static void write_char_descr(uint16_t conn_id, uint16_t handle, uint16_t value_len, uint8_t *value)
 {
-    ble_gattc_write_flat(conn_id, handle, value, value_len, on_write, &conn_id);
+    int rc = ble_gattc_write_flat(conn_id, handle, value, value_len, on_write, &conn_id);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Error: Failed to write descriptor; rc=%d", rc);
+        return;
+    }
     WAIT_CB();
 }
 
@@ -650,7 +677,16 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
             MODLOG_DFLT(INFO, "Connection established ");
 
             rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
-            assert(rc == 0);
+            if (rc != 0) {
+                dev = opening_dev;
+                if (dev) {
+                    dev->status = rc;
+                    dev->ble.conn_id = -1;
+                }
+                ESP_LOGE(TAG, "ble_gap_conn_find failed: %d", rc);
+                SEND_CB();
+                return 0;
+            }
             dev = esp_hidh_dev_get_by_bda(desc.peer_ota_addr.val);
             if (!dev) {
                 dev = opening_dev;
@@ -965,6 +1001,14 @@ esp_hidh_dev_t *esp_ble_hidh_dev_open(uint8_t *bda, uint8_t address_type)
 
     /* perform service discovery and fill the report maps */
     read_device_services(dev);
+    if (dev->status != ESP_OK || dev->reports_len == 0) {
+        ret = dev->status != ESP_OK ? dev->status : ESP_FAIL;
+        ESP_LOGE(TAG, "HID service discovery failed: status=0x%x reports=%u",
+                 dev->status, (unsigned)dev->reports_len);
+        (void)esp_ble_hidh_dev_close(dev);
+        esp_hidh_dev_free_inner(dev);
+        return NULL;
+    }
 
     if (event_loop_handle) {
         esp_hidh_event_data_t p = {0};
