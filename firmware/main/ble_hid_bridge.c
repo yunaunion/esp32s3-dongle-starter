@@ -490,7 +490,7 @@ static esp_err_t schedule_auto_connect(const paired_device_t *device)
     copy_text(ctx->name, sizeof(ctx->name), device->name);
     copy_text(ctx->kind, sizeof(ctx->kind), device->kind);
 
-    if (xTaskCreate(auto_connect_task, "ble_auto_connect", 4096, ctx, 4, NULL) != pdPASS) {
+    if (xTaskCreate(auto_connect_task, "ble_auto_connect", 8192, ctx, 4, NULL) != pdPASS) {
         free(ctx);
         return ESP_FAIL;
     }
@@ -752,7 +752,7 @@ esp_err_t ble_hid_bridge_init(void)
     esp_err_t err;
     esp_hidh_config_t config = {
         .callback = hidh_callback,
-        .event_stack_size = 4096,
+        .event_stack_size = 8192,
         .callback_arg = NULL,
     };
 

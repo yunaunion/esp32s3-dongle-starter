@@ -739,15 +739,9 @@ esp_hidh_gattc_event_handler(struct ble_gap_event *event, void *arg)
             dev->status = -1; // set to not found and clear if HID service is found
             dev->ble.conn_id = event->connect.conn_handle;
 
-            /* Try to set the mtu to the max value */
-            rc = ble_att_set_preferred_mtu(BLE_ATT_MTU_MAX);
-            if (rc != 0) {
-                ESP_LOGE(TAG, "att preferred mtu set failed");
-            }
-            rc = ble_gattc_exchange_mtu(event->connect.conn_handle, NULL, NULL);
-            if (rc != 0) {
-                ESP_LOGE(TAG, "Failed to negotiate MTU; rc = %d", rc);
-            }
+            /* Keep discovery as the first GATT procedure. Starting MTU exchange here can
+             * overlap with service discovery for some HID devices and trigger NimBLE panics.
+             */
             SEND_CB();
         } else {
             set_debug_phase("gap.connect.failed");

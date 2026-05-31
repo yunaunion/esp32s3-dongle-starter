@@ -68,6 +68,6 @@ void app_main(void)
     status_led_set(STATUS_LED_READY);
     manager_protocol_emit_event("status.changed", manager_protocol_status_json());
 
-    xTaskCreate(manager_task, "manager_task", 4096, NULL, 5, NULL);
+    xTaskCreate(manager_task, "manager_task", 8192, NULL, 5, NULL);
     ESP_LOGI(TAG, "ESP32-S3 BLE HID dongle manager started");
 }
