@@ -96,11 +96,11 @@ static void write_rgb(uint8_t red, uint8_t green, uint8_t blue)
         return;
     }
 
-    const uint8_t grb[3] = { green, red, blue };
+    const uint8_t rgb[3] = { red, green, blue };
     const rmt_transmit_config_t tx_config = {
         .loop_count = 0,
     };
-    esp_err_t err = rmt_transmit(led_channel, led_encoder, grb, sizeof(grb), &tx_config);
+    esp_err_t err = rmt_transmit(led_channel, led_encoder, rgb, sizeof(rgb), &tx_config);
     if (err == ESP_OK) {
         err = rmt_tx_wait_all_done(led_channel, 100);
     }
