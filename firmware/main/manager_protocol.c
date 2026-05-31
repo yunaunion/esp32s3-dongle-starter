@@ -2,11 +2,15 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "ble_hid_bridge.h"
 #include "cJSON.h"
 #include "esp_err.h"
+#include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "pairing_store.h"
 #include "status_led.h"
 
@@ -14,15 +18,33 @@
 #define PROTOCOL_VERSION 1
 
 static const char *TAG = "manager";
+static SemaphoreHandle_t s_stdout_mutex;
+
+static void lock_stdout(void)
+{
+    if (s_stdout_mutex != NULL) {
+        xSemaphoreTake(s_stdout_mutex, portMAX_DELAY);
+    }
+}
+
+static void unlock_stdout(void)
+{
+    if (s_stdout_mutex != NULL) {
+        xSemaphoreGive(s_stdout_mutex);
+    }
+}
 
 static void send_json(cJSON *root)
 {
+    lock_stdout();
     char *text = cJSON_PrintUnformatted(root);
     if (text != NULL) {
         printf("%s\n", text);
         cJSON_free(text);
     }
     cJSON_Delete(root);
+    fflush(stdout);
+    unlock_stdout();
 }
 
 static void send_ok(const char *id, cJSON *data)
@@ -59,9 +81,28 @@ static bool any_device_connected(void)
     return false;
 }
 
+static size_t connected_device_count(void)
+{
+    size_t connected = 0;
+    for (size_t index = 0; index < pairing_store_count(); ++index) {
+        const paired_device_t *device = pairing_store_get(index);
+        if (device != NULL && device->connected) {
+            ++connected;
+        }
+    }
+    return connected;
+}
+
 static void show_store_led_state(void)
 {
     status_led_set(any_device_connected() ? STATUS_LED_CONNECTED : STATUS_LED_READY);
+}
+
+void manager_protocol_init(void)
+{
+    if (s_stdout_mutex == NULL) {
+        s_stdout_mutex = xSemaphoreCreateMutex();
+    }
 }
 
 void manager_protocol_emit_event(const char *event, cJSON *data)
@@ -79,6 +120,7 @@ cJSON *manager_protocol_status_json(void)
     cJSON_AddStringToObject(status, "ble", ble_hid_bridge_state());
     cJSON_AddStringToObject(status, "usb", "cdc+hid");
     cJSON_AddNumberToObject(status, "pairedCount", pairing_store_count());
+    cJSON_AddNumberToObject(status, "connectedCount", connected_device_count());
     return status;
 }
 
@@ -166,10 +208,8 @@ void manager_protocol_handle_line(const char *line)
         send_ok(id, NULL);
         manager_protocol_emit_event("status.changed", manager_protocol_status_json());
     } else if (strcmp(command, "pair.start") == 0) {
-        status_led_set(STATUS_LED_PAIRING);
         esp_err_t err = ble_hid_bridge_pair_start(params);
         if (err == ESP_OK) {
-            show_store_led_state();
             send_ok(id, NULL);
             manager_protocol_emit_event("status.changed", manager_protocol_status_json());
         } else {
@@ -177,9 +217,15 @@ void manager_protocol_handle_line(const char *line)
         }
     } else if (strcmp(command, "bond.delete") == 0) {
         const char *device_id = json_string(params, "id");
-        esp_err_t err = pairing_store_delete(device_id);
+        const paired_device_t *device = pairing_store_find(device_id);
+        esp_err_t err = ESP_ERR_NOT_FOUND;
+        if (device != NULL) {
+            err = ble_hid_bridge_forget_device(device);
+            if (err == ESP_OK) {
+                err = pairing_store_delete(device_id);
+            }
+        }
         if (err == ESP_OK) {
-            show_store_led_state();
             send_ok(id, NULL);
             manager_protocol_emit_event("bond.changed", paired_devices_json());
             manager_protocol_emit_event("status.changed", manager_protocol_status_json());
@@ -188,22 +234,20 @@ void manager_protocol_handle_line(const char *line)
         }
     } else if (strcmp(command, "connect") == 0) {
         const char *device_id = json_string(params, "id");
-        esp_err_t err = pairing_store_set_connected(device_id, true);
+        const paired_device_t *device = pairing_store_find(device_id);
+        esp_err_t err = device != NULL ? ble_hid_bridge_connect_device(device) : ESP_ERR_NOT_FOUND;
         if (err == ESP_OK) {
-            show_store_led_state();
             send_ok(id, NULL);
-            manager_protocol_emit_event("bond.changed", paired_devices_json());
             manager_protocol_emit_event("status.changed", manager_protocol_status_json());
         } else {
             send_error(id, "not_found", "Device is not in the pairing store");
         }
     } else if (strcmp(command, "disconnect") == 0) {
         const char *device_id = json_string(params, "id");
-        esp_err_t err = pairing_store_set_connected(device_id, false);
+        const paired_device_t *device = pairing_store_find(device_id);
+        esp_err_t err = device != NULL ? ble_hid_bridge_disconnect_device(device) : ESP_ERR_NOT_FOUND;
         if (err == ESP_OK) {
-            show_store_led_state();
             send_ok(id, NULL);
-            manager_protocol_emit_event("bond.changed", paired_devices_json());
             manager_protocol_emit_event("status.changed", manager_protocol_status_json());
         } else {
             send_error(id, "not_found", "Device is not in the pairing store");

@@ -9,6 +9,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES
         bt
+        esp_hid
         nvs_flash
         json
         esp_driver_gpio

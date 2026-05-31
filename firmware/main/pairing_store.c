@@ -211,8 +211,16 @@ esp_err_t pairing_store_upsert(const paired_device_t *device)
     }
 
     devices[index] = *device;
-    devices[index].connected = false;
     return save_devices();
+}
+
+const paired_device_t *pairing_store_find_by_address(const char *address)
+{
+    int index = find_index_by_address(address);
+    if (index < 0) {
+        return NULL;
+    }
+    return &devices[index];
 }
 
 esp_err_t pairing_store_update_policy(const char *id, const char *label, const bool *auto_connect)

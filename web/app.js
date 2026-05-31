@@ -148,7 +148,7 @@ class SerialTransport {
     }
   }
 
-  async request(command, params = {}) {
+  async request(command, params = {}, timeoutMs = 8000) {
     const id = String(this.nextId++);
     const payload = { id, command, params };
     const line = `${JSON.stringify(payload)}\n`;
@@ -159,7 +159,7 @@ class SerialTransport {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${commandLabel(command)}がタイムアウトしました`));
-      }, 8000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
     });
   }
@@ -221,14 +221,14 @@ els.clearLogButton.addEventListener("click", () => {
   renderLog();
 });
 
-async function request(command, params = {}) {
+async function request(command, params = {}, options = {}) {
   if (state.demo) {
     return demoRequest(command, params);
   }
   if (!state.connected) {
     throw new Error("ドングルに接続していません。");
   }
-  return transport.request(command, params);
+  return transport.request(command, params, options.timeoutMs ?? 8000);
 }
 
 async function refreshAll() {
@@ -248,7 +248,7 @@ async function startScan(options = {}) {
   try {
     state.discovered = [];
     renderScanList();
-    await request("scan.start", { durationMs: 10000, hidOnly: true });
+    await request("scan.start", { durationMs: 5000, hidOnly: true });
     logLine(options.automatic ? "接続後の自動スキャンを開始しました" : "スキャンを開始しました");
   } catch (error) {
     showError(error);
@@ -266,7 +266,12 @@ async function stopScan() {
 
 async function pairDevice(device) {
   try {
-    await request("pair.start", { address: device.address, addressType: device.addressType });
+    await request("pair.start", {
+      address: device.address,
+      addressType: device.addressType,
+      name: device.name,
+      kind: device.kind,
+    }, { timeoutMs: 20000 });
     await refreshAll();
   } catch (error) {
     showError(error);
@@ -405,8 +410,8 @@ function renderPairedList() {
     autoConnect.checked = Boolean(device.autoConnect);
     autoConnect.addEventListener("change", () => setPolicy(device, { autoConnect: autoConnect.checked }));
 
-    row.querySelector(".connect-device").addEventListener("click", () => request("connect", { id: device.id }).then(refreshAll).catch(showError));
-    row.querySelector(".disconnect-device").addEventListener("click", () => request("disconnect", { id: device.id }).then(refreshAll).catch(showError));
+    row.querySelector(".connect-device").addEventListener("click", () => request("connect", { id: device.id }, { timeoutMs: 20000 }).then(refreshAll).catch(showError));
+    row.querySelector(".disconnect-device").addEventListener("click", () => request("disconnect", { id: device.id }, { timeoutMs: 10000 }).then(refreshAll).catch(showError));
     row.querySelector(".delete-device").addEventListener("click", () => deleteDevice(device));
     els.pairedList.append(row);
   }

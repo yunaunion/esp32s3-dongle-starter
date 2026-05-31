@@ -20,6 +20,7 @@ esp_err_t pairing_store_init(void);
 size_t pairing_store_count(void);
 const paired_device_t *pairing_store_get(size_t index);
 const paired_device_t *pairing_store_find(const char *id);
+const paired_device_t *pairing_store_find_by_address(const char *address);
 esp_err_t pairing_store_upsert(const paired_device_t *device);
 esp_err_t pairing_store_update_policy(const char *id, const char *label, const bool *auto_connect);
 esp_err_t pairing_store_set_connected(const char *id, bool connected);

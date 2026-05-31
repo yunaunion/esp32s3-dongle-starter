@@ -65,6 +65,7 @@ void app_main(void)
     ESP_ERROR_CHECK(pairing_store_init());
     ESP_ERROR_CHECK(usb_hid_bridge_init());
     ESP_ERROR_CHECK(ble_hid_bridge_init());
+    manager_protocol_init();
 
     status_led_set(STATUS_LED_READY);
     manager_protocol_emit_event("status.changed", manager_protocol_status_json());
